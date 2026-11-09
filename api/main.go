@@ -410,6 +410,13 @@ func main() {
 		write(w, r, r.URL.Query().Get("ip"), "")
 	}))
 
+	monitor := newDashboardMonitor(
+		dashboard,
+		monitorDuration("ALERT_INTERVAL", defaultAlertInterval, 10*time.Second, 15*time.Minute),
+		monitorDuration("ALERT_SOURCE_STALE_AFTER", defaultSourceStaleAfter, time.Minute, 7*24*time.Hour),
+	)
+	go monitor.run(context.Background())
+
 	srv := &http.Server{Addr: addr, Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, MaxHeaderBytes: 16 << 10}
 	log.Printf("Lagezentrum-API auf %s, Datei %s", addr, s.path)
 	log.Fatal(srv.ListenAndServe())

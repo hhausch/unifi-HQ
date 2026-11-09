@@ -89,6 +89,8 @@ services:
     environment:
       HOSTS_FILE: /config/hosts.csv
       DASHBOARD_FILE: /config/dashboard.json
+      ALERT_INTERVAL: ${ALERT_INTERVAL:-1m}
+      ALERT_SOURCE_STALE_AFTER: ${ALERT_SOURCE_STALE_AFTER:-15m}
       LISTEN: 127.0.0.1:8092
       AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}   # ./lagezentrum.sh password
       AUTH_SECRET: ${AUTH_SECRET:-}

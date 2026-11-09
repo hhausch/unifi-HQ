@@ -51,8 +51,9 @@ type dashboardAlert struct {
 }
 
 type dashboardData struct {
-	Devices map[string]devicePreferences `json:"devices"`
-	Alerts  []dashboardAlert             `json:"alerts"`
+	Devices     map[string]devicePreferences `json:"devices"`
+	Alerts      []dashboardAlert             `json:"alerts"`
+	SourceStale map[string]bool              `json:"sourceStale,omitempty"`
 }
 
 type dashboardStore struct {
@@ -66,7 +67,10 @@ func newDashboardStore(path string) *dashboardStore {
 }
 
 func (s *dashboardStore) loadLocked() (dashboardData, error) {
-	data := dashboardData{Devices: map[string]devicePreferences{}, Alerts: []dashboardAlert{}}
+	data := dashboardData{
+		Devices: map[string]devicePreferences{}, Alerts: []dashboardAlert{},
+		SourceStale: map[string]bool{},
+	}
 	f, err := os.Open(s.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return data, nil
@@ -95,6 +99,9 @@ func (s *dashboardStore) loadLocked() (dashboardData, error) {
 	}
 	if data.Alerts == nil {
 		data.Alerts = []dashboardAlert{}
+	}
+	if data.SourceStale == nil {
+		data.SourceStale = map[string]bool{}
 	}
 	if len(data.Devices) > maxDashboardIPs {
 		return dashboardData{}, errors.New("too many device preferences")
@@ -312,7 +319,7 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 			fail(w, http.StatusBadRequest, "invalid alert key")
 			return
 		}
-		if input.Type != "device" && input.Type != "first-contact" {
+		if input.Type != "device" && input.Type != "first-contact" && input.Type != "volume" && input.Type != "source" {
 			fail(w, http.StatusBadRequest, "invalid alert type")
 			return
 		}
@@ -378,12 +385,7 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 			return
 		}
 		var input struct {
-			Samples []struct {
-				IP        string  `json:"ip"`
-				Period    string  `json:"period"`
-				Direction string  `json:"direction"`
-				Bytes     float64 `json:"bytes"`
-			} `json:"samples"`
+			Samples []volumeSample `json:"samples"`
 		}
 		if !decodeDashboardJSON(w, r, &input) {
 			return
@@ -392,61 +394,20 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 			fail(w, http.StatusBadRequest, "too many volume samples")
 			return
 		}
-		for _, sample := range input.Samples {
-			if _, err := netip.ParseAddr(strings.TrimSpace(sample.IP)); err != nil ||
+		for i, sample := range input.Samples {
+			ip, err := netip.ParseAddr(strings.TrimSpace(sample.IP))
+			if err != nil ||
 				!validPeriod(sample.Period) || !validDirection(sample.Direction) ||
 				math.IsNaN(sample.Bytes) || math.IsInf(sample.Bytes, 0) || sample.Bytes < 0 {
 				fail(w, http.StatusBadRequest, "invalid volume sample")
 				return
 			}
+			input.Samples[i].IP = ip.String()
 		}
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		data, err := s.loadLocked()
+		created, err := s.checkVolumeSamples(input.Samples)
 		if err != nil {
-			fail(w, http.StatusInternalServerError, "cannot read dashboard settings")
+			fail(w, http.StatusInternalServerError, "saving volume alert state failed")
 			return
-		}
-		now := s.now().UTC()
-		created := make([]dashboardAlert, 0)
-		for _, sample := range input.Samples {
-			ip, parseErr := netip.ParseAddr(strings.TrimSpace(sample.IP))
-			if parseErr != nil {
-				continue
-			}
-			prefs, ok := data.Devices[ip.String()]
-			if !ok || prefs.VolumeThresholdGiB <= 0 ||
-				prefs.VolumePeriod != sample.Period || prefs.VolumeDirection != sample.Direction {
-				continue
-			}
-			stateKey := sample.Period + ":" + sample.Direction
-			if prefs.VolumeAbove == nil {
-				prefs.VolumeAbove = map[string]bool{}
-			}
-			over := sample.Bytes >= prefs.VolumeThresholdGiB*1024*1024*1024
-			if over && !prefs.VolumeAbove[stateKey] {
-				detail := fmt.Sprintf("%s used %.2f GiB in %s (%s; limit %.2f GiB)",
-					ip, sample.Bytes/(1024*1024*1024), sample.Period, sample.Direction, prefs.VolumeThresholdGiB)
-				alert, alertErr := makeDashboardAlert(
-					fmt.Sprintf("volume:%s:%s:%s:%g:%s", ip, sample.Period, sample.Direction, prefs.VolumeThresholdGiB, now.Format("2006010215")),
-					"volume", "Device volume threshold exceeded", detail, ip.String(), "device", ip.String(), now)
-				if alertErr != nil {
-					fail(w, http.StatusInternalServerError, "cannot create volume alert")
-					return
-				}
-				prefs.VolumeAbove[stateKey] = true
-				data.Alerts = prependAlert(data.Alerts, alert)
-				created = append(created, alert)
-			} else if !over {
-				prefs.VolumeAbove[stateKey] = false
-			}
-			data.Devices[ip.String()] = prefs
-		}
-		if len(input.Samples) > 0 {
-			if err := s.saveLocked(data); err != nil {
-				fail(w, http.StatusInternalServerError, "saving volume alert state failed")
-				return
-			}
 		}
 		jsonOut(w, http.StatusOK, map[string]any{"alerts": created})
 	}))

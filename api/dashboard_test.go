@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,89 @@ func testDashboardMux(t *testing.T, path string, auth *authCfg) *http.ServeMux {
 	mux := http.NewServeMux()
 	newDashboardStore(path).routes(mux, auth)
 	return mux
+}
+
+func TestSourceMonitoringCreatesTransitionsOnly(t *testing.T) {
+	store := newDashboardStore(filepath.Join(t.TempDir(), "dashboard.json"))
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	last := now.Add(-20 * time.Minute)
+	observations := map[string]sourceObservation{
+		"NetFlow/IPFIX": {last: &last},
+		"Firewall/Syslog": {},
+	}
+	if err := store.updateSourceStates(observations, 15*time.Minute, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.updateSourceStates(observations, 15*time.Minute, now); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	data, err := store.loadLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Alerts) != 1 || !data.SourceStale["NetFlow/IPFIX"] {
+		t.Fatalf("expected one stale-source alert and persisted state, got %+v", data)
+	}
+
+	recovered := now.Add(-time.Minute)
+	observations["NetFlow/IPFIX"] = sourceObservation{last: &recovered}
+	if err := store.updateSourceStates(observations, 15*time.Minute, now); err != nil {
+		t.Fatal(err)
+	}
+	store.mu.Lock()
+	data, err = store.loadLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Alerts) != 2 || data.SourceStale["NetFlow/IPFIX"] {
+		t.Fatalf("expected a recovery alert and cleared stale state, got %+v", data)
+	}
+}
+
+func TestServerMonitorDiscoversDevicesAndFirstContacts(t *testing.T) {
+	store := newDashboardStore(filepath.Join(t.TempDir(), "dashboard.json"))
+	now := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	monitor := newDashboardMonitor(store, time.Minute, 15*time.Minute)
+	monitor.now = func() time.Time { return now }
+	monitor.discovery = &discoveryState{
+		devices: map[string]bool{}, countries: map[string]bool{}, orgs: map[string]bool{}, ready: true,
+	}
+	rows := []map[string]json.RawMessage{
+		{
+			"local_ip": json.RawMessage(`"10.0.0.5"`), "local_name": json.RawMessage(`"NAS"`),
+			"remote_ip": json.RawMessage(`"203.0.113.8"`), "r_country": json.RawMessage(`"DE"`),
+			"r_country_name": json.RawMessage(`"Germany"`), "r_org": json.RawMessage(`"Example ISP"`),
+		},
+	}
+	monitor.query = func(_ context.Context, query string, _ int) ([]map[string]json.RawMessage, error) {
+		if strings.Contains(query, "_time:2m") {
+			return rows, nil
+		}
+		return nil, nil
+	}
+	monitor.checkDiscoveries(context.Background())
+	monitor.checkDiscoveries(context.Background())
+	store.mu.Lock()
+	data, err := store.loadLocked()
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Alerts) != 3 {
+		t.Fatalf("expected device, country, and organization alerts exactly once, got %d: %+v", len(data.Alerts), data.Alerts)
+	}
+	types := map[string]int{}
+	for _, alert := range data.Alerts {
+		types[alert.Type]++
+	}
+	if types["device"] != 1 || types["first-contact"] != 2 {
+		t.Fatalf("unexpected discovery alert types: %+v", types)
+	}
 }
 
 func dashboardRequest(mux *http.ServeMux, method, path, body string, origin string, cookie *http.Cookie) *httptest.ResponseRecorder {

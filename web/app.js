@@ -535,10 +535,6 @@
         inbound: vl(`${T} dir:"in" leg:req | stats by (dport, proto) count() as v | sort by (v desc) | limit 6`),
         cAll: vl(`${T} (dir:out or dir:"in") r_country:* | stats by (r_country) count() if (leg:req) as n, sum(bytes) as b`)
       };
-      if (settings.alerts) checkVolumeThresholds().catch(err => {
-        console.warn('Volume thresholds not checked:', err);
-        toast(`Volume thresholds could not be checked: ${err.message || err}`, null, 'info');
-      });
       if (filters.blocked) {
         jobs.cBlk = vl(`${T} dir:blocked | stats by (r_country, r_country_name) count() as v | sort by (v desc) | limit 6`);
         jobs.ports = vl(`${T} dir:blocked | stats by (dport) count() as v | sort by (v desc) | limit 6`);
@@ -1240,7 +1236,6 @@
               group: group.value, note: note.value, volumePeriod: period.value,
               volumeDirection: direction.value, volumeThresholdGiB: thresholdGiB
             });
-            await checkVolumeThresholds();
           } catch (err) {
             toast(`Could not save device settings: ${err.message || err}`, null, 'info');
             loadDevices();
@@ -1725,56 +1720,15 @@
   }
   function checkFirstContact(e) {
     if (e.dir !== 'out' && e.dir !== 'in') return;
-    const who = e.local_name || e.local_ip;
-    const alertWindow = Math.floor(Date.now() / (30 * 86400000));
     if (known.devicesReady && e.local_ip && !known.devices.has(e.local_ip)) {
       known.devices.add(e.local_ip); e.isNew = true;
-      if (settings.alerts) recordAlert({
-        key: `device:${e.local_ip}:${alertWindow}`,
-        type: 'device', title: 'Device not seen in 30 days', detail: `${who} (${e.local_ip})`,
-        ip: e.local_ip, targetType: 'device', targetValue: e.local_ip
-      });
     }
     if (!known.ready) return;
     if (e.r_country && !known.countries.has(e.r_country)) {
       known.countries.add(e.r_country); e.isNew = true;
-      if (settings.alerts) recordAlert({
-        key: `first-contact:country:${e.local_ip}:${e.r_country}:${alertWindow}`,
-        type: 'first-contact', title: `First contact with ${country(e.r_country)}`,
-        detail: `${who} → ${e.r_org || e.remote_ip}`, ip: e.local_ip,
-        targetType: 'country', targetValue: e.r_country
-      });
     } else if (e.r_org && !known.orgs.has(e.r_org)) {
       known.orgs.add(e.r_org); e.isNew = true;
-      if (settings.alerts) recordAlert({
-        key: `first-contact:org:${e.local_ip}:${e.r_org}:${alertWindow}`,
-        type: 'first-contact', title: `New remote: ${e.r_org}`,
-        detail: `${flag(e.r_country)} ${country(e.r_country)} · from ${who}`, ip: e.local_ip,
-        targetType: 'org', targetValue: e.r_org
-      });
     }
-  }
-
-  async function checkVolumeThresholds() {
-    if (isDemo || !settings.alerts) return;
-    const configs = [...devicePrefs].filter(([, pref]) => +pref.volumeThresholdGiB > 0);
-    if (!configs.length) return;
-    const groups = new Map();
-    for (const [ip, pref] of configs) {
-      const period = pref.volumePeriod || '24h', direction = pref.volumeDirection || 'both';
-      const key = `${period}:${direction}`;
-      if (!groups.has(key)) groups.set(key, { period, direction, ips: [] });
-      groups.get(key).ips.push(ip);
-    }
-    const samples = [];
-    await Promise.all([...groups.values()].map(async ({ period, direction, ips }) => {
-      const dir = direction === 'both' ? '(dir:out or dir:"in")' : `dir:${direction === 'in' ? '"in"' : direction}`;
-      const rows = await vl(`_time:${period} ${dir} | stats by (local_ip) sum(bytes) as b`, 5000);
-      const totals = new Map(rows.map(r => [r.local_ip, +r.b || 0]));
-      ips.forEach(ip => samples.push({ ip, period, direction, bytes: totals.get(ip) || 0 }));
-    }));
-    const result = await dashboardApi('api/dashboard/volume-check', { method: 'POST', body: JSON.stringify({ samples }) });
-    (result.alerts || []).forEach(alert => { showAlert(alert); });
   }
 
   // ---------- Meldungen ----------
@@ -1790,7 +1744,7 @@
   }
 
   const alertDrawer = $('alerts');
-  const alertTypeLabel = type => type === 'device' ? 'Device' : type === 'volume' ? 'Volume limit' : 'First contact';
+  const alertTypeLabel = type => type === 'device' ? 'Device' : type === 'volume' ? 'Volume limit' : type === 'source' ? 'Data source' : 'First contact';
   function updateAlertCount() {
     const unread = alertRecords.filter(a => !a.read).length;
     const badge = $('alertCount');
@@ -1828,9 +1782,13 @@
     }));
     updateAlertCount();
   }
-  async function refreshAlerts() {
+  async function refreshAlerts(notifyNew = false) {
+    const previous = new Set(alertRecords.map(alert => alert.id));
     alertRecords = await dashboardApi('api/dashboard/alerts');
     renderAlerts();
+    if (notifyNew) {
+      for (const alert of alertRecords) if (!previous.has(alert.id)) showAlert(alert);
+    }
   }
   async function refreshDevicePreferences() {
     const devices = await dashboardApi('api/dashboard/devices');
@@ -1853,7 +1811,7 @@
     const open = alert.targetType && alert.targetValue
       ? () => { markAlertsRead([alert.id]); openDossier(alert.targetType, alert.targetValue); }
       : null;
-    toast(`${alert.title}: ${alert.detail}`, open, alert.type === 'volume' ? 'limit' : 'new');
+    if (settings.alerts) toast(`${alert.title}: ${alert.detail}`, open, alert.type === 'volume' ? 'limit' : 'new');
     if (settings.browserNotifications && 'Notification' in window && Notification.permission === 'granted') {
       const notification = new Notification(alert.title, { body: alert.detail, tag: alert.key });
       notification.onclick = () => {
@@ -1861,16 +1819,6 @@
         if (open) open();
         notification.close();
       };
-    }
-  }
-  async function recordAlert(input) {
-    if (isDemo) return;
-    try {
-      const result = await dashboardApi('api/dashboard/alerts', { method: 'POST', body: JSON.stringify(input) });
-      if (result.created) await showAlert(result.alert);
-    } catch (err) {
-      console.warn('Could not save notification:', err);
-      toast(`Could not save notification: ${err.message || err}`, null, 'info');
     }
   }
   $('openAlerts').addEventListener('click', async () => {
@@ -1933,7 +1881,7 @@
   // Bedienelement -> Einstellung; „ui“ = Oberfläche neu anwenden, „globe“ = Globus neu anwenden
   const OPTS = [
     { id: 'optSmooth', key: 'smooth', type: 'check', after: () => { if (!settings.smooth) flushPending(); } },
-    { id: 'optAlerts', key: 'alerts', type: 'check', after: () => { if (settings.alerts) loadStats(); } },
+    { id: 'optAlerts', key: 'alerts', type: 'check' },
     { id: 'optTheme', key: 'theme', type: 'select', ui: true, globe: true },
     { id: 'optPalette', key: 'palette', type: 'select', ui: true, globe: true, after: () => renderSpark() },
     { id: 'optScale', key: 'uiScale', type: 'select', num: true, ui: true },
@@ -2049,9 +1997,8 @@
       setInterval(async () => {
         try {
           await refreshDevicePreferences();
-          if (document.hidden) await checkVolumeThresholds();
-          else loadStats();
-          if (!alertDrawer.hidden) await refreshAlerts();
+          if (!document.hidden) loadStats();
+          await refreshAlerts(true);
         } catch (err) {
           console.warn('Dashboard refresh failed:', err);
         }
