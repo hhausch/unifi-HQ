@@ -18,7 +18,7 @@
 #   CT_HOSTNAME=lagezentrum
 #   TEMPLATE_STORAGE=local
 #   Weitergereicht an das Setup im Container (dann wird dort nicht gefragt):
-#   ALLOWED_SENDERS WAN_IP LOCAL_EXTRA_NETS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME LOCAL_SERVER_PORTS
+#   ALLOWED_SENDERS WAN_IP LOCAL_EXTRA_NETS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME LOCAL_SERVER_PORTS TLS_DOMAIN HTTPS_PORT
 set -euo pipefail
 
 ok() { printf '\033[32m✔\033[0m %s\n' "$*"; }
@@ -93,7 +93,7 @@ pct exec "$CTID" -- getent hosts deb.debian.org >/dev/null 2>&1 || die "Containe
 # --- Projekt in den Container bringen ---------------------------------------
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 envs=()
-for k in ALLOWED_SENDERS WAN_IP LOCAL_EXTRA_NETS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME LOCAL_SERVER_PORTS REPO_URL REPO_BRANCH; do
+for k in ALLOWED_SENDERS WAN_IP LOCAL_EXTRA_NETS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME LOCAL_SERVER_PORTS TLS_DOMAIN HTTPS_PORT REPO_URL REPO_BRANCH; do
   [ -n "${!k:-}" ] && envs+=("$k=${!k}")
 done
 
@@ -124,7 +124,10 @@ fi
 ip=$(pct exec "$CTID" -- hostname -I 2>/dev/null | awk '{print $1}')
 echo
 ok "Fertig: CT $CTID ($CT_HOSTNAME), IP ${ip:-?}"
-echo "  Dashboard:  http://${ip:-<IP>}:8080        Demo: http://${ip:-<IP>}:8080/?demo"
+tls_domain=${TLS_DOMAIN:-${ip:-<IP>}}
+https_port=${HTTPS_PORT:-8443}
+echo "  Dashboard:  https://${tls_domain}:${https_port}       HTTP: http://${tls_domain}:${HTTP_PORT:-8080}"
+echo "  Hinweis:    Bei direktem HTTPS Caddys internes Zertifikat vertrauen; HTTP nur hinter TLS-Reverse-Proxy/im vertrauenswürdigen Netz verwenden."
 echo "  UniFi:      NetFlow/IPFIX -> ${ip:-<IP>}:2055    Syslog (SIEM) -> ${ip:-<IP>}:5514"
 echo "  Feste IP:   im UniFi eine DHCP-Reservierung für $CT_HOSTNAME anlegen (oder IP=… nutzen)"
 echo "  Verwalten:  pct enter $CTID   dann   cd /opt/lagezentrum && ./lagezentrum.sh status"

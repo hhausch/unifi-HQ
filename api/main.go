@@ -117,7 +117,8 @@ func recordedSource(last *time.Time, err error, label string, now time.Time) ser
 		return serviceStatus{State: "waiting", Detail: "No recorded events"}
 	}
 	state := "idle"
-	if now.Sub(*last) <= 5*time.Minute {
+	age := now.Sub(*last)
+	if age >= 0 && age <= 5*time.Minute {
 		state = "healthy"
 	}
 	return serviceStatus{State: state, Detail: label, LastSeen: last}
@@ -313,10 +314,15 @@ func main() {
 	}
 	s := &store{path: env("HOSTS_FILE", "/config/hosts.csv")}
 	addr := env("LISTEN", "127.0.0.1:8092")
-	auth := newAuth(os.Getenv("AUTH_PASSWORD_HASH"), os.Getenv("AUTH_SECRET"))
+	auth := newAuth(
+		os.Getenv("AUTH_PASSWORD_HASH"),
+		os.Getenv("AUTH_SECRET"),
+		os.Getenv("AUTH_REQUIRED") != "false",
+		os.Getenv("AUTH_COOKIE_SECURE") == "true",
+	)
 	switch {
 	case auth.bad != nil:
-		log.Printf("FEHLER: AUTH_PASSWORD_HASH ungültig (%v) – Dashboard gesperrt, bis ./lagezentrum.sh password ein neues Passwort setzt", auth.bad)
+		log.Printf("FEHLER: Login nicht verfügbar (%v) – Dashboard gesperrt, bis ./lagezentrum.sh password ein Passwort setzt oder Login explizit deaktiviert", auth.bad)
 	case auth.enabled:
 		log.Print("Login aktiv")
 	default:

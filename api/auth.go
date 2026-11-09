@@ -1,7 +1,7 @@
 // Login fürs Dashboard: ein Passwort, Sitzung als signiertes Cookie (400 Tage, gleitend).
 // Caddy fragt vor jeder Anfrage (außer Login-Seite, /vendor/ und /auth/*) per forward_auth
-// bei /auth/check nach. Ohne gesetztes Passwort (AUTH_PASSWORD_HASH leer) ist alles offen –
-// wie vor dem Login.
+// bei /auth/check nach. Ohne gesetztes Passwort bleibt der Zugriff gesperrt, außer
+// AUTH_REQUIRED=false wurde ausdrücklich gesetzt (./lagezentrum.sh password off).
 //
 //	POST /auth/login    <- {"password":"…"}   setzt das Cookie
 //	POST /auth/logout                        löscht das Cookie in diesem Browser
@@ -191,20 +191,26 @@ func clientKey(r *http.Request) string {
 // --- Sitzungen ----------------------------------------------------------------------
 
 type authCfg struct {
-	enabled bool  // Passwort gesetzt
-	bad     error // Passwort-Hash unlesbar: alles gesperrt, bis er repariert ist
-	hash    *pwHash
-	macKey  []byte
-	lim     *limiter
-	sem     chan struct{}
-	now     func() time.Time
-	delay   time.Duration
+	enabled       bool  // Login erforderlich
+	bad           error // Passwort fehlt oder Hash ist unlesbar: Zugriff bleibt gesperrt
+	hash          *pwHash
+	macKey        []byte
+	secureCookies bool
+	lim           *limiter
+	sem           chan struct{}
+	now           func() time.Time
+	delay         time.Duration
 }
 
-func newAuth(hashStr, secret string) *authCfg {
+func newAuth(hashStr, secret string, requirePassword, secureCookies bool) *authCfg {
 	a := &authCfg{lim: newLimiter(), sem: make(chan struct{}, maxConcurrent), now: time.Now, delay: failDelay}
+	a.secureCookies = secureCookies
 	hashStr = strings.TrimSpace(hashStr)
 	if hashStr == "" {
+		if requirePassword {
+			a.enabled = true
+			a.bad = errors.New("password is not configured")
+		}
 		return a
 	}
 	a.enabled = true
@@ -281,7 +287,7 @@ func isHTTPS(r *http.Request) bool {
 func (a *authCfg) setCookie(w http.ResponseWriter, r *http.Request, value string, maxAge time.Duration) {
 	c := &http.Cookie{
 		Name: cookieName, Value: value, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: isHTTPS(r),
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies || isHTTPS(r),
 	}
 	if maxAge > 0 {
 		c.MaxAge = int(maxAge / time.Second)
@@ -388,8 +394,8 @@ func (a *authCfg) routes(mux *http.ServeMux) {
 			return
 		}
 		if a.bad != nil {
-			log.Printf("Login unmöglich, AUTH_PASSWORD_HASH ungültig: %v", a.bad)
-			fail(w, 503, "Login misconfigured. On the server run: ./lagezentrum.sh password")
+			log.Printf("Login nicht verfügbar: %v", a.bad)
+			fail(w, 503, "Login is not configured correctly. On the server run: ./lagezentrum.sh password")
 			return
 		}
 		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {

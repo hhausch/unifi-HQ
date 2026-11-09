@@ -39,9 +39,14 @@ pct exec "$CTID" -- rm -f /root/lagezentrum-update.tar.gz
 ok "Dateien in CT $CTID aktualisiert"
 
 echo "Baue und starte neu …"
+pct exec "$CTID" -- bash -c 'cd /opt/lagezentrum && ./lagezentrum.sh ensure-tls-domain'
 pct exec "$CTID" -- bash -c 'cd /opt/lagezentrum && chmod +x lagezentrum.sh install.sh scripts/*.sh && docker compose up -d --build --remove-orphans 2>&1 | grep -vE "^ *(=>|#)" | tail -5 && docker compose restart collector caddy >/dev/null'
 pct exec "$CTID" -- bash -c 'cd /opt/lagezentrum && ./lagezentrum.sh test' || true
 if ! pct exec "$CTID" -- grep -qE '^AUTH_PASSWORD_HASH=.+' /opt/lagezentrum/.env; then
-  printf '\033[33m!\033[0m %s\n' "Noch kein Login-Passwort. Setzen: pct enter $CTID, dann /opt/lagezentrum/lagezentrum.sh password"
+  if pct exec "$CTID" -- grep -qE '^AUTH_REQUIRED=false$' /opt/lagezentrum/.env; then
+    printf '\033[33m!\033[0m %s\n' "Login ist explizit deaktiviert."
+  else
+    printf '\033[33m!\033[0m %s\n' "Dashboard bleibt ohne Login-Passwort gesperrt. Setzen: pct enter $CTID, dann /opt/lagezentrum/lagezentrum.sh password"
+  fi
 fi
 ok "Fertig. Im Browser einmal neu laden (Strg+F5)."

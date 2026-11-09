@@ -2,6 +2,7 @@
 /.env
 /config/hosts.csv
 /caddy/auth/*.caddy
+/lagezentrum-ca.crt
 # heruntergeladene GeoIP-Datenbanken
 /geoip/*
 !/geoip/.gitkeep

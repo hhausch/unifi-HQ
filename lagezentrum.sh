@@ -29,10 +29,18 @@ ensure_secret() {
   if [ -z "$(env_get AUTH_SECRET)" ]; then env_set AUTH_SECRET "$(gen_secret)"; c_ok "Schlüssel für Login-Sitzungen angelegt (AUTH_SECRET)"; fi
 }
 lxc_ip() { hostname -I 2>/dev/null | awk '{print $1}'; }
+ensure_tls_domain() {
+  [ -f .env ] || return 0
+  [ -n "$(env_get TLS_DOMAIN)" ] && return 0
+  local domain; domain=$(lxc_ip)
+  [ -n "$domain" ] || die "TLS_DOMAIN konnte nicht erkannt werden. Bitte eine erreichbare IP oder einen DNS-Namen in .env setzen."
+  env_set TLS_DOMAIN "$domain"
+  c_ok "TLS_DOMAIN=$domain gesetzt"
+}
 vlq() { curl -fsS --max-time 10 http://127.0.0.1:9428/select/logsql/query --data-urlencode "query=$1"; }
 
 # Einstellungen, die setup aus der Umgebung übernimmt (z. B. von install.sh / create-lxc.sh)
-SETUP_KEYS="WAN_IP LOCAL_EXTRA_NETS ALLOWED_SENDERS LOCAL_SERVER_PORTS IGNORE_IPS HTTP_PORT ALLOWED_CLIENTS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME RETENTION MAX_DISK TZ"
+SETUP_KEYS="WAN_IP LOCAL_EXTRA_NETS ALLOWED_SENDERS LOCAL_SERVER_PORTS IGNORE_IPS HTTP_PORT HTTPS_PORT TLS_DOMAIN ALLOWED_CLIENTS HOME_LAT HOME_LON HOME_LABEL GATEWAY_NAME RETENTION MAX_DISK TZ"
 
 GIVEN=" "
 ask() {  # ask KEY "Frage" "Vorschlag"  -> setzt KEY in der .env (nur interaktiv)
@@ -58,6 +66,7 @@ cmd_setup() {
   for k in $SETUP_KEYS; do
     if [ -n "${!k+x}" ] && [ -n "${!k}" ]; then env_set "$k" "${!k}"; GIVEN+="$k "; c_ok "$k=${!k} übernommen"; fi
   done
+  ensure_tls_domain
 
   if [ -z "$(env_get WAN_IP)" ]; then
     wan=$(curl -4 -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)
@@ -113,7 +122,7 @@ EOF
   fi
   sleep 3
   docker compose ps
-  if [ -z "$(env_get AUTH_PASSWORD_HASH)" ]; then
+  if [ -z "$(env_get AUTH_PASSWORD_HASH)" ] && [ "$(env_get AUTH_REQUIRED || echo true)" != "false" ]; then
     local yn=n
     if [ -z "${LZ_NONINTERACTIVE:-}" ] && { : </dev/tty; } 2>/dev/null; then
       echo
@@ -123,18 +132,23 @@ EOF
     if [[ "$yn" =~ ^[JjYy] ]]; then
       ( cmd_password ) </dev/tty || c_warn "Passwort nicht gesetzt – später: ./lagezentrum.sh password"
     else
-      c_warn "Kein Login-Passwort gesetzt – jeder im LAN sieht das Dashboard. Setzen: ./lagezentrum.sh password"
+      c_warn "Kein Login-Passwort gesetzt – Dashboard bleibt gesperrt. Setzen: ./lagezentrum.sh password"
     fi
+  elif [ -z "$(env_get AUTH_PASSWORD_HASH)" ]; then
+    c_warn "Login ist explizit deaktiviert – jeder erlaubte LAN-Client kann das Dashboard öffnen."
   fi
   local ip; ip=$(lxc_ip)
+  local https_port; https_port=$(env_get HTTPS_PORT); https_port=${https_port:-8443}
   echo
-  c_ok "Fertig. Dashboard: http://${ip:-<LXC-IP>}:$(env_get HTTP_PORT || echo 8080)   Demo: …/?demo"
+  c_ok "Fertig. Dashboard: https://$(env_get TLS_DOMAIN):${https_port}   HTTP: http://$(env_get TLS_DOMAIN):$(env_get HTTP_PORT)"
+  c_warn "Für HTTPS direkt: Caddys internes Zertifikat auf den Geräten vertrauen. Für Reverse Proxy: HTTP-Port nur im vertrauenswürdigen Netz verwenden."
   echo "  Im UniFi eintragen:  NetFlow/IPFIX -> ${ip:-<LXC-IP>}:2055   Syslog (SIEM) -> ${ip:-<LXC-IP>}:5514"
   echo "  Danach: ./lagezentrum.sh test"
 }
 
 cmd_test() {
   need_docker
+  ensure_tls_domain
   docker compose ps --status running --services | grep -qx collector || die "Collector läuft nicht (docker compose up -d)"
   local marker; marker=$(date +%s)
   # IPFIX-Paket mit aktueller Exportzeit: Template + 1 Flow 10.37.10.250:40000 -> 9.9.9.9:443 TCP (4242 Bytes)
@@ -161,15 +175,21 @@ cmd_test() {
   [ "${blk:-0}" -gt 0 ] && c_ok "Syslog-Pfad: Vector -> VictoriaLogs funktioniert" || c_err "Syslog-Test nicht angekommen (docker compose logs collector)"
   local geo; geo=$(vlq "_time:5m dir:blocked rule:\"Selbsttest $marker\" | fields r_country" 2>/dev/null | head -1)
   [[ "$geo" == *'"US"'* ]] && c_ok "GeoIP funktioniert (45.33.32.156 -> US)" || c_warn "GeoIP-Zuordnung fehlt ($geo)"
-  local port; port=$(env_get HTTP_PORT | grep . || echo 8080)
-  local code; code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/" || true)
-  if [ -n "$(env_get AUTH_PASSWORD_HASH)" ]; then
-    local lcode; lcode=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/login.html" || true)
-    [ "$code" = 401 ] && [ "$lcode" = 200 ] && c_ok "Dashboard antwortet, Login aktiv (ohne Anmeldung HTTP $code)" \
-      || c_err "Dashboard/Login antwortet nicht wie erwartet (/: HTTP $code, /login.html: HTTP $lcode – docker compose logs api caddy)"
+  local domain https_port base_url
+  domain=$(env_get TLS_DOMAIN)
+  https_port=$(env_get HTTPS_PORT); https_port=${https_port:-8443}
+  base_url="https://${domain}:${https_port}"
+  local code; code=$(curl -k -s -o /dev/null -w '%{http_code}' "$base_url/" || true)
+  if [ -n "$(env_get AUTH_PASSWORD_HASH)" ] || [ "$(env_get AUTH_REQUIRED)" != "false" ]; then
+    local lcode; lcode=$(curl -k -s -o /dev/null -w '%{http_code}' "$base_url/login.html" || true)
+    [ "$code" = 401 ] && [ "$lcode" = 200 ] && c_ok "HTTPS antwortet, Login erforderlich (ohne Anmeldung HTTP $code)" \
+      || c_err "Dashboard/Login antwortet nicht wie erwartet (/: Status $code, /login.html: Status $lcode – docker compose logs api caddy)"
+    if [ -z "$(env_get AUTH_PASSWORD_HASH)" ]; then
+      c_warn "Noch kein Passwort gesetzt – Dashboard bleibt gesperrt. Setzen: ./lagezentrum.sh password"
+    fi
   else
-    [ "$code" = 200 ] || [ "$code" = 401 ] && c_ok "Dashboard antwortet (HTTP $code)" || c_err "Dashboard antwortet nicht (HTTP $code)"
-    c_warn "Kein Login-Passwort gesetzt – jeder im LAN sieht das Dashboard (./lagezentrum.sh password)"
+    [ "$code" = 200 ] && c_ok "HTTPS antwortet ohne Login (Status $code)" || c_err "Dashboard antwortet nicht (Status $code)"
+    c_warn "Kein Login-Passwort gesetzt – jeder erlaubte LAN-Client kann das Dashboard öffnen (./lagezentrum.sh password)"
   fi
   echo "Hinweis: Der Testflow taucht als „raus 10.37.10.250 -> 9.9.9.9 (Quad9)“ in der Historie auf."
 }
@@ -204,6 +224,7 @@ api_image() {  # immer bauen (geht dank Cache schnell): ein altes Image kennt ha
   docker compose build api >/dev/null || die "API-Image konnte nicht gebaut werden (docker compose build api)"
 }
 apply_auth() {  # API mit neuer .env starten, Caddy neu laden
+  ensure_tls_domain
   docker compose up -d api >/dev/null
   docker compose restart caddy >/dev/null; sleep 1
 }
@@ -220,6 +241,7 @@ cmd_password() {
   case "${1:-}" in
     off)
       env_set AUTH_PASSWORD_HASH ""
+      env_set AUTH_REQUIRED false
       remove_basic_auth
       apply_auth
       c_warn "Login ausgeschaltet – jeder im LAN sieht das Dashboard"
@@ -244,6 +266,7 @@ cmd_password() {
   [[ "$hash" == pbkdf2-sha256:* ]] || die "Hash konnte nicht erzeugt werden"
   umask 077
   env_set AUTH_PASSWORD_HASH "$hash"
+  env_set AUTH_REQUIRED true
   ensure_secret
   chmod 600 .env
   remove_basic_auth
@@ -253,6 +276,7 @@ cmd_password() {
 
 cmd_update() {
   need_docker
+  ensure_tls_domain
   docker compose pull --ignore-buildable
   docker compose build --pull
   docker compose up -d
@@ -268,5 +292,6 @@ case "${1:-}" in
   password) shift; cmd_password "$@" ;;
   update) cmd_update ;;
   logs) need_docker; docker compose logs -f --tail 50 ;;
+  ensure-tls-domain) ensure_tls_domain ;;
   *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

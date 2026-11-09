@@ -16,7 +16,7 @@ func testAuth(t *testing.T) (*authCfg, *http.ServeMux, *time.Time) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := newAuth(h, "test-secret-0123456789abcdef")
+	a := newAuth(h, "test-secret-0123456789abcdef", true, false)
 	now := time.Unix(1_800_000_000, 0)
 	a.now = func() time.Time { return now }
 	a.delay = 0
@@ -115,6 +115,22 @@ func TestLoginFlow(t *testing.T) {
 	if !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Secure || c.MaxAge != int(sessionTTL/time.Second) || c.Path != "/" {
 		t.Fatalf("Cookie-Attribute: %+v", c)
 	}
+	w = do(mux, "POST", "/auth/login", `{"password":"`+testPW+`"}`,
+		map[string]string{"Content-Type": "application/json", "Origin": "https://lz.lan:8080", "X-Forwarded-Proto": "https"}, nil)
+	if !sessionCookie(t, w).Secure {
+		t.Fatal("HTTPS-Sitzungscookie muss Secure setzen")
+	}
+	secureProxyHash, err := hashPassword(testPW, 10_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secureProxy := newAuth(secureProxyHash, "test-secret-0123456789abcdef", true, true)
+	secureMux := http.NewServeMux()
+	secureProxy.routes(secureMux)
+	w = login(secureMux, testPW)
+	if !sessionCookie(t, w).Secure {
+		t.Fatal("Sitzungscookie hinter HTTP-TLS-Proxy muss Secure setzen")
+	}
 	if w := do(mux, "GET", "/auth/check", "", nil, c); w.Code != 204 {
 		t.Fatalf("check mit Cookie: %d", w.Code)
 	}
@@ -155,7 +171,7 @@ func TestNewPasswordInvalidatesSessions(t *testing.T) {
 	a, mux, _ := testAuth(t)
 	c := sessionCookie(t, login(mux, testPW))
 	h2, _ := hashPassword("neues-passwort-123", 10_000)
-	b := newAuth(h2, "test-secret-0123456789abcdef")
+	b := newAuth(h2, "test-secret-0123456789abcdef", true, false)
 	b.now = a.now
 	mux2 := http.NewServeMux()
 	b.routes(mux2)
@@ -186,7 +202,7 @@ func TestBruteForceLock(t *testing.T) {
 }
 
 func TestDisabledAndBroken(t *testing.T) {
-	open := newAuth("", "")
+	open := newAuth("", "", false, false)
 	mux := http.NewServeMux()
 	open.routes(mux)
 	if w := do(mux, "GET", "/auth/check", "", nil, nil); w.Code != 204 {
@@ -196,11 +212,21 @@ func TestDisabledAndBroken(t *testing.T) {
 		t.Fatalf("session ohne Passwort: %s", w.Body.String())
 	}
 
-	broken := newAuth("pbkdf2-sha256:kaputt", "x")
+	broken := newAuth("pbkdf2-sha256:kaputt", "x", true, false)
 	mux = http.NewServeMux()
 	broken.routes(mux)
 	if w := do(mux, "GET", "/auth/check", "", nil, nil); w.Code != 401 {
 		t.Fatalf("kaputter Hash muss sperren: %d", w.Code)
+	}
+
+	unconfigured := newAuth("", "", true, false)
+	mux = http.NewServeMux()
+	unconfigured.routes(mux)
+	if w := do(mux, "GET", "/auth/check", "", nil, nil); w.Code != 401 {
+		t.Fatalf("nicht konfiguriertes Passwort muss sperren: %d", w.Code)
+	}
+	if w := login(mux, testPW); w.Code != 503 {
+		t.Fatalf("Login ohne konfiguriertes Passwort: %d", w.Code)
 	}
 }
 

@@ -107,7 +107,9 @@ More options: `CTID`, `STORAGE`, `DISK`, `CORES`, `RAM`, `SWAP`, `BRIDGE`, `CT_H
    ```
 
 `install.sh` installs packages and Docker, sets everything up, asks for a few values (Enter accepts
-the suggestion) and runs a self-test. Without cloning:
+the suggestion) and runs a self-test. The dashboard supports direct HTTPS with a Caddy-managed local
+CA and HTTP for trusted networks or a TLS-terminating reverse proxy. The setup picks the LXC IP as its
+certificate name. Without cloning:
 `curl -fsSL https://raw.githubusercontent.com/hhausch/unifi-HQ/main/install.sh | bash`.
 
 ### Setup values
@@ -115,13 +117,70 @@ the suggestion) and runs a self-test. Without cloning:
 | Value | Meaning |
 |---|---|
 | `WAN_IP` | public IPv4, detected automatically |
+| `TLS_DOMAIN` | dashboard IP or DNS name; setup defaults to the LXC IP |
+| `HTTPS_PORT` | dashboard HTTPS port, default `8443` |
+| `HTTP_PORT` | dashboard HTTP port, default `8080`; can be used as a TLS reverse-proxy upstream |
+| `AUTH_COOKIE_SECURE` | set to `true` when a reverse proxy terminates TLS before forwarding HTTP to the dashboard |
 | `ALLOWED_SENDERS` | IP of the gateway sending NetFlow/syslog (default: the LXC's default gateway) |
 | `GATEWAY_NAME`, `HOME_LABEL`, `HOME_LAT`, `HOME_LON` | name and location on the globe |
 | `LOCAL_EXTRA_NETS` | your IPv6 prefix, e.g. `2003:ab:cd00::/56`, otherwise your own IPv6 devices show up as foreign |
 | `LOCAL_SERVER_PORTS` | ports reachable from outside (port forwards, VPN server), default `51820` |
-| Login password | asked at the end of `setup` (min. 10 characters), stored only as a hash in `.env` |
+| Login password | asked at the end of `setup` (min. 10 characters), stored only as a hash in `.env`; without one the dashboard stays locked |
 
-Everything lives in `.env` and can be changed there (then `docker compose up -d`). Device names go
+Everything lives in `.env` and can be changed there (then `docker compose up -d`). Direct HTTPS is at
+`https://<TLS_DOMAIN>:8443`, and HTTP is also available at `http://<TLS_DOMAIN>:8080`. Use HTTP only
+on a trusted network or as the upstream of a reverse proxy that provides public HTTPS; do not expose
+the HTTP port to untrusted networks. When a reverse proxy terminates TLS and forwards HTTP, set
+`AUTH_COOKIE_SECURE=true` in `.env` so session cookies remain `Secure`, and ensure the proxy's source
+address is allowed by `ALLOWED_CLIENTS`.
+
+For direct HTTPS, Caddy uses a private local CA, so browsers must trust its root certificate. After
+opening the HTTPS URL once, export the public root certificate from the LXC:
+
+```bash
+docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./lagezentrum-ca.crt
+```
+
+Install `lagezentrum-ca.crt` as a trusted root certificate on each device that uses the dashboard.
+Keep the certificate private key inside Caddy's persistent Docker volume; never export that key.
+If that volume is lost, Caddy creates a new CA and clients must trust its new root certificate.
+If the LXC IP changes, update `TLS_DOMAIN` to the new IP and restart Caddy.
+
+### Reverse proxy with TLS termination
+
+To let another reverse proxy manage the public certificate, point it to the Lagezentrum HTTP
+listener on port `8080`. For example, with Caddy on the proxy host:
+
+```caddyfile
+dashboard.example.com {
+    reverse_proxy 10.37.10.50:8080
+}
+```
+
+Replace the hostname and backend IP with yours. The proxy must terminate HTTPS, preserve the
+original `Host` header (needed for login-origin checks), forward `X-Forwarded-Proto: https`, and
+support WebSocket upgrades for `/ws` (Caddy's `reverse_proxy` does this automatically). Proxy the
+whole site at its root; do not strip or rewrite paths such as `/api`, `/auth`, `/select` or `/ws`.
+
+On the Lagezentrum host, configure `.env` to trust the proxy connection and keep cookies secure:
+
+```dotenv
+ALLOWED_CLIENTS=10.37.10.2
+AUTH_COOKIE_SECURE=true
+```
+
+Use the reverse proxy's actual source IP for `ALLOWED_CLIENTS` (or its subnet if it can change).
+Restart the API to apply the cookie setting:
+
+```bash
+docker compose up -d api
+```
+
+Keep port `8080` reachable only from the reverse proxy and other explicitly trusted clients; do
+not expose it directly to the internet. This Caddyfile rejects requests containing
+`Cf-Connecting-Ip`, so Cloudflare proxy/tunnel setups are not supported by this configuration.
+
+Device names go
 into `config/hosts.csv`, one per line: `10.37.10.3,homelable` (then `docker compose restart collector`).
 `setup` also adds a monthly GeoIP update cron job. Re-running `./lagezentrum.sh setup` is safe.
 
@@ -185,8 +244,8 @@ pct enter <LXC ID>
 Sends a test flow and a test syslog line through the whole chain and checks they arrive in the
 history (incl. GeoIP). Then:
 
-1. `http://<LXC-IP>:8080/?demo` shows the login page, then the globe with sample data, no UniFi needed
-2. `http://<LXC-IP>:8080` should show **Live** with a green dot in the top left
+1. `https://<LXC-IP>:8443/?demo` shows the login page, then the globe with sample data, no UniFi needed (trust Caddy's certificate as described above)
+2. `https://<LXC-IP>:8443` should show **Live** with a green dot in the top left
 3. Real flows take about a minute after enabling them in UniFi (IPFIX templates)
 
 ## Usage
@@ -221,7 +280,7 @@ dport:443 | stats by (local_name) sum(bytes) bytes     custom query with pipes
 
 Fields: `dir` (out/in/blocked/internal), `leg`, `proto`, `local_ip`, `local_name`, `remote_ip`,
 `remote_name`, `sport`, `dport`, `bytes`, `packets`, `duration_ms`, `rule`, `r_country`, `r_country_name`,
-`r_city`, `r_org`, `r_asn`, `in_if`, `out_if`. The full VictoriaLogs UI is at `http://<LXC-IP>:8080/select/vmui/`.
+`r_city`, `r_org`, `r_asn`, `in_if`, `out_if`. The full VictoriaLogs UI is at `https://<LXC-IP>:8443/select/vmui/`.
 
 URL options: `?demo` (sample data), `?lite` (for weak devices like a Pi kiosk: no relief, stars or
 country fills, fewer arcs).
@@ -255,10 +314,10 @@ cd /root/unifi-HQ && git pull
 
 Copies the new version into the container, rebuilds and runs the self-test. `.env`, `hosts.csv`,
 GeoIP data, password and history are kept. Option B (git inside the container):
-`cd /opt/lagezentrum && git pull && docker compose up -d --build && docker compose restart collector caddy`.
+`cd /opt/lagezentrum && git pull && ./lagezentrum.sh update`.
 
-**First update to the version with login:** the dashboard stays open until a password is set
-(the update script tells you). Set it once inside the container:
+**First update to the version with required login:** if no password is configured, the dashboard
+stays locked until one is set. Set it inside the container:
 
 ```bash
 pct enter <LXC ID>
@@ -275,13 +334,19 @@ maximum), renewed on every use. A kiosk that opens the dashboard regularly stays
 ```bash
 ./lagezentrum.sh password          # set or change password (signs out all browsers)
 ./lagezentrum.sh password logout   # sign out all browsers, keep password
-./lagezentrum.sh password off      # disable login, anyone on the LAN can see the dashboard
+./lagezentrum.sh password off      # explicitly disable login; any allowed LAN client can access it
 ```
 
 Everything is protected: dashboard, live stream (`/ws`), history (`/select`, including the VictoriaLogs UI),
 names API and `config.json`. Without a session, pages redirect to `/login.html` and everything else
-returns `401`. Only the login page and `/vendor/` (globe.gl, textures, fonts, no data) are public.
+returns `401`. If no password is configured, access remains locked until `./lagezentrum.sh password`
+sets one. Only the login page and `/vendor/` (globe.gl, textures, fonts, no data) are public.
 Internal services still listen on `127.0.0.1` only; the self-test and collector talk to them directly.
+
+HTTPS on port 8443 uses Caddy's internal CA, persisted in the `caddy-data` Docker volume. Trust the
+exported `lagezentrum-ca.crt` on each client to avoid browser certificate warnings. HTTP on port 8080
+is also available for trusted networks or a TLS-terminating reverse proxy. For that setup, set
+`AUTH_COOKIE_SECURE=true` in `.env` and keep the HTTP upstream private to the proxy.
 
 ```bash
 ./lagezentrum.sh status      # containers, RAM, disk, events in the last hour
@@ -315,13 +380,17 @@ Internal services still listen on `127.0.0.1` only; the self-test and collector 
 - **Names API:** anyone allowed to open the dashboard can set names via `/api/names`, i.e. only signed-in
   LAN clients. The API validates IP and name, only accepts same-origin JSON and only writes
   `config/hosts.csv`. Its only privilege is sending the reload signal to Vector.
-- **Login:** `./lagezentrum.sh password` (see [Login](#login)). Caddy checks every request with the API
-  (`forward_auth`). The password is stored only as a PBKDF2 hash (600,000 rounds, SHA-256) in `.env`; the
-  session cookie is signed with `AUTH_SECRET` (HMAC-SHA256), `HttpOnly` and `SameSite=Lax`. A new password
-  or `password logout` invalidates all cookies. Brute force: each failed attempt costs one second, after
-  5 failures the address is locked for 1 minute, doubling each time (max 15 minutes).
-  The cookie isn't `Secure` because the dashboard runs over plain HTTP on the LAN. Anyone who can sniff
-  LAN traffic can read the cookie. Fine for a home network; guests and IoT belong in their own VLAN anyway.
+- **Login:** required by default; without a configured password the dashboard stays locked. Use
+  `./lagezentrum.sh password` to set one or explicitly opt out with `password off`. Caddy checks every
+  request with the API (`forward_auth`). The password is stored only as a PBKDF2 hash (600,000 rounds,
+  SHA-256) in `.env`; the session cookie is signed with `AUTH_SECRET` (HMAC-SHA256), `HttpOnly`,
+  `Secure` and `SameSite=Lax`. A new password or `password logout` invalidates all cookies. Brute force:
+  each failed attempt costs one second, after 5 failures the address is locked for 1 minute, doubling
+  each time (max 15 minutes).
+- **HTTPS:** Caddy serves the dashboard over TLS using its own internal CA; import the root certificate
+  on each client as described above. The CA key stays in the persistent `caddy-data` Docker volume.
+  HTTP is also available for trusted networks and TLS-terminating reverse proxies; never expose that
+  upstream to untrusted networks, and set `AUTH_COOKIE_SECURE=true` when the proxy terminates TLS.
 
 ## Resources
 
@@ -355,7 +424,8 @@ the browser, not on the server, and pauses in background tabs.
 | Forgot password | | `./lagezentrum.sh password` sets a new one |
 | Login says *Too many failed attempts* | locked after 5 failures | wait (max 15 min) or `docker compose restart api` |
 | *502* everywhere | API not running, Caddy lets no one through without it | `docker compose ps`, `docker compose logs api` |
-| Login works, then back to login page | browser blocks cookies for the LXC IP | allow cookies for `http://<LXC-IP>:8080` |
+| Browser warns about the HTTPS certificate | Caddy's local CA is not trusted on this device | export `root.crt` as described above and install it as a trusted root certificate |
+| Login works, then back to login page | browser blocks cookies for the LXC IP | allow cookies for `https://<TLS_DOMAIN>:8443` |
 
 Allow rules are recognized by name (`-A-`, "allow", "accept"). If your logs use a different pattern,
 it's one line in the `blocked` transform in `collector/vector.yaml`.

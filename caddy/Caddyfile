@@ -4,14 +4,13 @@
 # mit Passwort-Login (./lagezentrum.sh password).
 {
 	admin off
-	auto_https off
 	persist_config off
 	servers {
-		protocols h1 h2c
+		protocols h1 h2 h2c
 	}
 }
 
-:{$HTTP_PORT:8080} {
+(dashboard) {
 	# "route" erzwingt die Reihenfolge: Zugriffsprüfung immer zuerst
 	# (sonst sortiert Caddy "abort" hinter "handle" und die Prüfung greift nie).
 	route {
@@ -26,8 +25,6 @@
 		abort @tunneled
 
 		# --- Altes Basic Auth -----------------------------------------------------
-		# Frühere Versionen legten hier basic_auth.caddy ab. ./lagezentrum.sh password
-		# entfernt sie und setzt stattdessen den Login. Bis dahin gilt sie weiter.
 		import /etc/caddy/auth/*.caddy
 
 		# --- Sicherheits-Header ------------------------------------------------
@@ -45,17 +42,12 @@
 
 		encode zstd gzip
 
-		# --- Login ----------------------------------------------------------------
-		# Alles außer Login-Seite, /vendor/ (Bibliothek, Texturen, Schriften) und /auth/*
-		# nur mit gültiger Sitzung. Die API prüft das Cookie: ohne Sitzung leitet sie
-		# Seitenaufrufe auf /login.html um, fetch, WebSocket und Abfragen bekommen 401.
-		# Ist kein Passwort gesetzt, lässt sie alles durch.
+		# Alles außer Login-Seite, /vendor/ und /auth/* erfordert eine gültige Sitzung.
 		@protected not path /login.html /login.css /login.js /favicon.svg /vendor/* /auth/*
 		forward_auth @protected 127.0.0.1:8092 {
 			uri /auth/check
 		}
 
-		# Login, Logout, Sitzung erneuern (nur 127.0.0.1:8092)
 		handle /auth/* {
 			@bad not method GET POST
 			respond @bad 405
@@ -65,13 +57,11 @@
 			reverse_proxy 127.0.0.1:8092
 		}
 
-		# Live-Stream von Vector (nur 127.0.0.1:8090)
 		handle /ws {
 			rewrite * /
 			reverse_proxy 127.0.0.1:8090
 		}
 
-		# API: Gerätenamen lesen/speichern (nur 127.0.0.1:8092)
 		handle /api/* {
 			@bad not method GET PUT DELETE
 			respond @bad 405
@@ -81,21 +71,18 @@
 			reverse_proxy 127.0.0.1:8092
 		}
 
-		# Laufzeit-Einstellungen fürs Dashboard aus der .env
 		handle /config.json {
 			header Content-Type application/json
 			header Cache-Control no-store
 			respond `{"home":{"lat":{$HOME_LAT:50.11},"lng":{$HOME_LON:8.68},"label":"{$HOME_LABEL:Home}"},"gateway":"{$GATEWAY_NAME:Gateway}"}` 200
 		}
 
-		# Abfragen + Weboberfläche von VictoriaLogs (/select/vmui/), nur lesend
 		handle /select/* {
 			@write not method GET HEAD POST
 			respond @write 405
 			reverse_proxy 127.0.0.1:9428
 		}
 
-		# Dashboard
 		handle {
 			root * /srv
 			@static path /vendor/*
@@ -104,4 +91,13 @@
 			file_server
 		}
 	}
+}
+
+http://:{$HTTP_PORT:8080} {
+	import dashboard
+}
+
+https://{$TLS_DOMAIN:localhost}:{$HTTPS_PORT:8443} {
+	tls internal
+	import dashboard
 }

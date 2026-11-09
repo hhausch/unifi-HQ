@@ -1,11 +1,11 @@
 # Lagezentrum – Live-Weltkarte für UniFi-Flows
 #
 #   Start:      ./lagezentrum.sh setup   (einmalig)   danach   docker compose up -d
-#   Dashboard:  http://<LXC-IP>:8080        Demo: http://<LXC-IP>:8080/?demo
+# Dashboard: https://<LXC-IP>:8443 or HTTP :8080 behind a TLS-terminating reverse proxy
 #
 # Alle Dienste laufen im Host-Netz des LXC:
 #   - UDP 2055 (NetFlow/IPFIX) und UDP 5514 (Syslog) nehmen nur Pakete vom Gateway an
-#   - TCP 8080 (Dashboard) beantwortet nur Clients aus dem lokalen Netz, mit Login
+#   - TCP 8080 (HTTP) and 8443 (HTTPS) serve the dashboard only to allowed LAN clients
 #   - VictoriaLogs (9428), der Live-Stream (8090) und GoFlow2-Metriken (8091)
 #     hören nur auf 127.0.0.1 und sind von außen nicht erreichbar
 # Kein Docker-NAT, kein docker-proxy, Absender-IPs bleiben erhalten.
@@ -91,6 +91,8 @@ services:
       LISTEN: 127.0.0.1:8092
       AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}   # ./lagezentrum.sh password
       AUTH_SECRET: ${AUTH_SECRET:-}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
     volumes:
       - ./config:/config
       - ./geoip:/geoip:ro
@@ -104,6 +106,8 @@ services:
     cap_add: [NET_BIND_SERVICE]
     environment:
       HTTP_PORT: ${HTTP_PORT:-8080}
+      HTTPS_PORT: ${HTTPS_PORT:-8443}
+      TLS_DOMAIN: ${TLS_DOMAIN:-localhost}
       ALLOWED_CLIENTS: ${ALLOWED_CLIENTS:-private_ranges}
       HOME_LAT: ${HOME_LAT:-50.11}
       HOME_LON: ${HOME_LON:-8.68}
@@ -113,11 +117,12 @@ services:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy/auth:/etc/caddy/auth:ro
       - ./web:/srv:ro
+      - caddy-data:/data
     tmpfs:
-      - /data:size=1m
       - /config:size=1m
     depends_on: [collector, victorialogs, api]
     mem_limit: 64m
 
 volumes:
   vlogs-data:
+  caddy-data:
