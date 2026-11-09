@@ -597,6 +597,65 @@
   });
   $('searchForm').addEventListener('submit', ev => { ev.preventDefault(); runSearch(); });
 
+  // ---------- Datenquellenstatus ----------
+  const systemStatus = $('systemStatus');
+  const statusItems = $('systemStatusItems');
+  let statusRefreshTimer = null;
+  const statusNames = {
+    api: 'Dashboard API', live: 'Live stream', history: 'History',
+    netflow: 'NetFlow / IPFIX', firewall: 'Firewall events',
+    geoipCity: 'GeoIP city database', geoipAsn: 'GeoIP ASN database'
+  };
+  const statusLabels = { healthy: 'Online', warning: 'Needs update', idle: 'Idle', waiting: 'Waiting for data', down: 'Unavailable' };
+  const timeAgo = value => {
+    if (!value) return '';
+    const seconds = Math.max(0, Math.round((Date.now() - Date.parse(value)) / 1000));
+    if (seconds < 60) return `${seconds}s ago`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+  };
+  async function loadSystemStatus() {
+    statusItems.replaceChildren(el('p', 'result-info', 'Loading status …'));
+    try {
+      const r = await fetch('api/status', { cache: 'no-store' });
+      if (r.status === 401) return toLogin();
+      if (!r.ok) throw new Error(`Status request failed (HTTP ${r.status})`);
+      const data = await r.json();
+      statusItems.replaceChildren(...Object.entries(statusNames).map(([key, name]) => {
+        const item = el('article', 'status-item');
+        const value = data[key] || { state: 'down', detail: 'No status received' };
+        item.dataset.state = value.state;
+        const title = el('h3', null, name);
+        const state = el('div', 'status-state', statusLabels[value.state] || 'Unknown');
+        const detail = value.lastSeen ? `${value.detail} · ${timeAgo(value.lastSeen)}` : value.detail;
+        item.append(title, state, el('p', null, detail));
+        return item;
+      }));
+      $('systemStatusChecked').textContent = `Checked ${new Date(data.checkedAt).toLocaleTimeString(LOCALE)}`;
+    } catch (err) {
+      statusItems.replaceChildren(el('p', 'result-info err', String(err.message || err)));
+      $('systemStatusChecked').textContent = '';
+    }
+  }
+  function closeSystemStatus() {
+    hideOverlay(systemStatus);
+    clearInterval(statusRefreshTimer);
+    statusRefreshTimer = null;
+  }
+  $('openSystemStatus').hidden = isDemo;
+  $('openSystemStatus').addEventListener('click', () => {
+    if (isDemo) return;
+    showOverlay(systemStatus);
+    loadSystemStatus();
+    clearInterval(statusRefreshTimer);
+    statusRefreshTimer = setInterval(loadSystemStatus, 30000);
+  });
+  $('refreshSystemStatus').addEventListener('click', loadSystemStatus);
+  $('closeSystemStatus').addEventListener('click', closeSystemStatus);
+  systemStatus.addEventListener('click', ev => { if (ev.target === systemStatus) closeSystemStatus(); });
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && !systemStatus.hidden) closeSystemStatus(); });
+
   const FIELDS = ['_msg', '_time', '_stream', 'kind', 'dir', 'bdir', 'leg', 'proto', 'local_ip', 'local_name', 'remote_ip', 'remote_name',
     'sport', 'dport', 'bytes', 'packets', 'rule', 'r_country', 'r_country_name', 'r_city', 'r_org', 'r_asn', 'r_lat', 'r_lon'];
   const FIELD_RE = new RegExp(`(^|[\\s(!-])(${FIELDS.join('|')}):`);

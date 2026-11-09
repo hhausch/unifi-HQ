@@ -93,6 +93,7 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:-}
     volumes:
       - ./config:/config
+      - ./geoip:/geoip:ro
     depends_on: [collector]
     mem_limit: 32m
 

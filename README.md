@@ -196,6 +196,7 @@ history (incl. GeoIP). Then:
 | | |
 |---|---|
 | **⚙ Settings** | *Smooth playback* (default on): the gateway sends flows in batches every few seconds; the dashboard buffers them and replays them in real time with a few seconds of measured delay. **Interface:** color scheme (night blue, graphite, black/OLED), direction colors (standard or colorblind-friendly), font size, panel opacity, hide stats or ticker. **Map:** globe or flat map, auto-rotation and speed, night lights or plain surface, relief, stars, atmosphere, borders, country shading, hotspots, home label, arc style, arcs per second, arc height. *Reset view* and *Reset all*. Stored in the browser. At the bottom: *Log out* (this browser only). |
+| **System** | API, live stream and history availability; last stored NetFlow/IPFIX and firewall event; GeoIP city and ASN database age. Refreshes while open. |
 | **Filter chips** | Out / In (on), Blocked / Internal (off), DNS (off). Stored in the browser. |
 | **Ticker** | Upload ↑, download ↓ and duration per connection. On hover: ✎ rename, dossier for device, country, company or IP. Click zooms to the location, double-click opens the history for that IP. Header shows connections and volume per minute. |
 | **Left panel** | 24 h counters with volume, number of destinations/companies/countries/devices, hourly chart (click the title to switch between connections and volume), top destinations, countries, services, largest and longest connections, devices. Countries, companies and devices open their dossier, the rest opens the history. |

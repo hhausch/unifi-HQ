@@ -6,17 +6,21 @@
 //	PUT    /api/names              <- {"ip":"10.37.10.3","name":"homelable"}  (leerer Name = löschen)
 //	DELETE /api/names?ip=10.37.10.3
 //	GET    /api/health
+//	GET    /api/status            -> service and data-source status (requires login)
 //
 // Dazu der Login (auth.go): /auth/login, /auth/logout, /auth/session, /auth/check.
 // "lz-api hash-password" liest ein Passwort von stdin und gibt den Hash für die .env aus.
 package main
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -44,11 +48,137 @@ type store struct {
 	path string
 }
 
+type serviceStatus struct {
+	State    string     `json:"state"`
+	Detail   string     `json:"detail"`
+	LastSeen *time.Time `json:"lastSeen,omitempty"`
+}
+
+type dashboardStatus struct {
+	CheckedAt time.Time      `json:"checkedAt"`
+	API       serviceStatus  `json:"api"`
+	Live      serviceStatus  `json:"live"`
+	History   serviceStatus  `json:"history"`
+	NetFlow   serviceStatus  `json:"netflow"`
+	Firewall  serviceStatus  `json:"firewall"`
+	GeoIPCity serviceStatus  `json:"geoipCity"`
+	GeoIPASN  serviceStatus  `json:"geoipAsn"`
+}
+
 func env(k, d string) string {
 	if v := os.Getenv(k); v != "" {
 		return v
 	}
 	return d
+}
+
+func latestEvent(ctx context.Context, query string) (*time.Time, error) {
+	form := url.Values{"query": {query}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:9428/select/logsql/query", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("VictoriaLogs returned HTTP %d", resp.StatusCode)
+	}
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 64<<10))
+	for {
+		var row struct {
+			Time string `json:"_time"`
+		}
+		if err := dec.Decode(&row); err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		if row.Time == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, row.Time)
+		if err != nil {
+			return nil, err
+		}
+		return &t, nil
+	}
+}
+
+func recordedSource(last *time.Time, err error, label string, now time.Time) serviceStatus {
+	if err != nil {
+		return serviceStatus{State: "down", Detail: "History unavailable"}
+	}
+	if last == nil {
+		return serviceStatus{State: "waiting", Detail: "No recorded events"}
+	}
+	state := "idle"
+	if now.Sub(*last) <= 5*time.Minute {
+		state = "healthy"
+	}
+	return serviceStatus{State: state, Detail: label, LastSeen: last}
+}
+
+func geoIPStatus(path string, now time.Time) serviceStatus {
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 {
+		return serviceStatus{State: "down", Detail: "Database missing"}
+	}
+	age := now.Sub(info.ModTime())
+	state := "healthy"
+	if age > 45*24*time.Hour {
+		state = "warning"
+	}
+	t := info.ModTime().UTC()
+	return serviceStatus{State: state, Detail: "Database available", LastSeen: &t}
+}
+
+func collectStatus() dashboardStatus {
+	now := time.Now().UTC()
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	var flowTime, firewallTime *time.Time
+	var flowErr, firewallErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		flowTime, flowErr = latestEvent(ctx, "kind:flow | sort by (_time desc) | limit 1")
+	}()
+	go func() {
+		defer wg.Done()
+		firewallTime, firewallErr = latestEvent(ctx, "kind:blocked | sort by (_time desc) | limit 1")
+	}()
+	wg.Wait()
+
+	live := serviceStatus{State: "healthy", Detail: "Listener reachable"}
+	conn, err := net.DialTimeout("tcp", "127.0.0.1:8090", time.Second)
+	if err != nil {
+		live = serviceStatus{State: "down", Detail: "Listener unavailable"}
+	} else {
+		_ = conn.Close()
+	}
+
+	history := serviceStatus{State: "healthy", Detail: "Queries successful"}
+	if flowErr != nil || firewallErr != nil {
+		history = serviceStatus{State: "down", Detail: "Query failed"}
+	}
+
+	return dashboardStatus{
+		CheckedAt: now,
+		API:       serviceStatus{State: "healthy", Detail: "Responding"},
+		Live:      live,
+		History:   history,
+		NetFlow:   recordedSource(flowTime, flowErr, "Last event", now),
+		Firewall:  recordedSource(firewallTime, firewallErr, "Last blocked event", now),
+		GeoIPCity: geoIPStatus("/geoip/dbip-city-lite.mmdb", now),
+		GeoIPASN:  geoIPStatus("/geoip/dbip-asn-lite.mmdb", now),
+	}
 }
 
 func (s *store) load() (map[string]string, error) {
@@ -198,6 +328,9 @@ func main() {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("GET /api/status", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		jsonOut(w, 200, collectStatus())
+	}))
 	mux.HandleFunc("GET /api/names", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		m, err := s.load()

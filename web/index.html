@@ -17,6 +17,7 @@
 <header>
   <h1>Lagezentrum<small id="gwName"></small></h1>
   <div class="status" id="status" data-state="connecting"><span class="dot"></span><span id="statusText">Connecting …</span></div>
+  <button class="tool" id="openSystemStatus" title="Data source and service status">System</button>
   <div class="filters" role="group" aria-label="Filter view">
     <button class="chip" data-f="out" aria-pressed="true"><i class="c-out"></i>Out</button>
     <button class="chip" data-f="in" aria-pressed="true"><i class="c-in"></i>In</button>
@@ -286,6 +287,21 @@
         <tbody></tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<div class="drawer" id="systemStatus" hidden role="dialog" aria-modal="true" aria-labelledby="systemStatusTitle">
+  <div class="drawer-box status-box">
+    <div class="drawer-head">
+      <div class="ds-head"><div class="kicker">Diagnostics</div><h2 id="systemStatusTitle">Data sources &amp; services</h2></div>
+      <span class="result-info" id="systemStatusChecked"></span>
+      <button class="tool" id="refreshSystemStatus">Refresh</button>
+      <button class="tool" id="closeSystemStatus" aria-label="Close">✕</button>
+    </div>
+    <div class="status-grid" id="systemStatusItems" aria-live="polite">
+      <p class="result-info">Loading status …</p>
+    </div>
+    <p class="result-info">Event timestamps show the latest records stored in history. Sources with no event stored in the last five minutes show as idle; quiet sources may show as waiting.</p>
   </div>
 </div>
 
