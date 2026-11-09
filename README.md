@@ -77,7 +77,7 @@ On the **Proxmox host** as root. Set `VLAN` to the real ID (e.g. `VLAN=10`). Tha
 
 ```bash
 apt -y install git
-git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /root/unifi-HQ
+git clone https://github.com/hhausch/unifi-HQ.git /root/unifi-HQ
 VLAN=xx /root/unifi-HQ/proxmox/create-lxc.sh
 ```
 
@@ -102,13 +102,13 @@ More options: `CTID`, `STORAGE`, `DISK`, `CORES`, `RAM`, `SWAP`, `BRIDGE`, `CT_H
 
    ```bash
    apt update && apt -y install git
-   git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /opt/lagezentrum
+   git clone https://github.com/hhausch/unifi-HQ.git /opt/lagezentrum
    /opt/lagezentrum/install.sh
    ```
 
 `install.sh` installs packages and Docker, sets everything up, asks for a few values (Enter accepts
 the suggestion) and runs a self-test. Without cloning:
-`curl -fsSL https://raw.githubusercontent.com/ProfessorQuantumUniverse/unifi-HQ/main/install.sh | bash`.
+`curl -fsSL https://raw.githubusercontent.com/hhausch/unifi-HQ/main/install.sh | bash`.
 
 ### Setup values
 

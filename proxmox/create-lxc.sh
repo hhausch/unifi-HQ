@@ -2,7 +2,7 @@
 # Lagezentrum – LXC auf dem Proxmox-Host anlegen und darin installieren
 #
 # Auf dem Proxmox-Host als root ausführen, am besten aus einem Klon des Repos:
-#   git clone https://github.com/ProfessorQuantumUniverse/unifi-HQ.git /root/unifi-HQ
+#   git clone https://github.com/hhausch/unifi-HQ.git /root/unifi-HQ
 #   /root/unifi-HQ/proxmox/create-lxc.sh
 #
 # Das Skript fasst keine Platten an. Den Storage für die Spare-SSD vorher einmal anlegen:
@@ -110,7 +110,7 @@ if [ -f "$here/docker-compose.yml" ] && [ -f "$here/install.sh" ]; then
   run=(bash /opt/lagezentrum/install.sh)
 else
   pct exec "$CTID" -- bash -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates git >/dev/null'
-  run=(bash -c "git clone -q \"${REPO_URL:-https://github.com/ProfessorQuantumUniverse/unifi-HQ.git}\" /opt/lagezentrum && bash /opt/lagezentrum/install.sh")
+  run=(bash -c "git clone -q \"${REPO_URL:-https://github.com/hhausch/unifi-HQ.git}\" /opt/lagezentrum && bash /opt/lagezentrum/install.sh")
 fi
 
 echo "Starte Installation im Container (Docker, GeoIP, Container) – dauert ein paar Minuten …"

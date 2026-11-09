@@ -3,7 +3,7 @@
 #
 #   Aus einem geklonten Repo:   ./install.sh
 #   Ohne Repo (öffentliches Repo oder mit Token in REPO_URL):
-#     curl -fsSL https://raw.githubusercontent.com/ProfessorQuantumUniverse/unifi-HQ/main/install.sh | bash
+#     curl -fsSL https://raw.githubusercontent.com/hhausch/unifi-HQ/main/install.sh | bash
 #
 # Was passiert:
 #   1. Pakete (curl, git, cron, …) und Docker installieren, falls nötig
@@ -15,7 +15,7 @@
 #   ALLOWED_SENDERS=10.37.10.1 HOME_LABEL=Frankfurt LZ_NONINTERACTIVE=1 ./install.sh
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/ProfessorQuantumUniverse/unifi-HQ.git}"
+REPO_URL="${REPO_URL:-https://github.com/hhausch/unifi-HQ.git}"
 REPO_BRANCH="${REPO_BRANCH:-}"
 LZ_DIR="${LZ_DIR:-/opt/lagezentrum}"
 
