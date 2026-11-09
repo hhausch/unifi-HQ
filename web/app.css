@@ -257,7 +257,17 @@ table.grid td.empty { color: var(--mute); }
 table.grid tbody tr { cursor: pointer; }
 table.grid tbody tr:hover { background: rgba(127,212,255,.06); }
 table.grid small { color: var(--mute); }
-.volume-threshold { width: 82px; padding: 3px 5px; background: var(--ink); border: 1px solid var(--line); border-radius: 3px; text-align: right; font: 12px var(--mono); }
+.alert-list { list-style: none; margin: 0; padding: 0 16px 16px; overflow: auto; }
+.alert-list li { display: grid; grid-template-columns: 90px 145px 1fr auto; gap: 8px 14px; align-items: center; padding: 10px 8px; border-bottom: 1px solid var(--line-soft); }
+.alert-list li.unread { background: color-mix(in srgb, var(--out) 7%, transparent); }
+.alert-list .alert-type, .alert-list time { color: var(--mute); font-size: 12px; }
+.alert-list .alert-title { font-weight: 600; }
+.alert-list .alert-detail { color: var(--mute); font-size: 13px; overflow-wrap: anywhere; }
+.alert-list button { background: none; border: 1px solid var(--line); border-radius: 3px; padding: 3px 8px; cursor: pointer; }
+.alert-list .empty { padding: 16px 8px; }
+.device-setting { min-width: 90px; max-width: 150px; padding: 3px 5px; background: var(--ink); border: 1px solid var(--line); border-radius: 3px; font: 12px var(--sans); }
+.device-note { min-width: 150px; }
+.device-threshold { width: 76px; text-align: right; font-family: var(--mono); }
 table.grid td[data-dir="out"] { color: var(--out); } table.grid td[data-dir="in"] { color: var(--in); } table.grid td[data-dir="internal"] { color: var(--internal); }
 .mini { display: block; height: 2px; background: var(--line); margin-top: 3px; } .mini i { display: block; height: 100%; background: var(--out); }
 .unnamed { color: var(--mute); font-style: italic; }
@@ -290,6 +300,11 @@ table.grid td[data-dir="out"] { color: var(--out); } table.grid td[data-dir="in"
 .toast.out { opacity: 0; transform: translateY(-6px); }
 @keyframes tin { from { opacity: 0; transform: translateY(-8px); } }
 @media (max-width: 900px) { .drawer-head { flex-wrap: wrap; } .ds-head { width: 100%; } }
+@media (max-width: 650px) {
+  .alert-list li { grid-template-columns: 1fr auto; }
+  .alert-list time, .alert-list .alert-type { grid-column: 1; }
+  .alert-list .alert-actions { grid-column: 2; grid-row: 1 / span 3; }
+}
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
 
 /* Schriftgröße und ausblendbare Leisten (⚙ → Oberfläche) */

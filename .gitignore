@@ -1,6 +1,7 @@
 # persönliche Einstellungen
 /.env
 /config/hosts.csv
+/config/dashboard.json
 /caddy/auth/*.caddy
 /lagezentrum-ca.crt
 # heruntergeladene GeoIP-Datenbanken

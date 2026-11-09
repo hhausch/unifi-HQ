@@ -254,7 +254,7 @@ history (incl. GeoIP). Then:
 
 | | |
 |---|---|
-| **⚙ Settings** | *Smooth playback* (default on): the gateway sends flows in batches every few seconds; the dashboard buffers them and replays them in real time with a few seconds of measured delay. **Interface:** color scheme (night blue, graphite, black/OLED), direction colors (standard or colorblind-friendly), font size, panel opacity, hide stats or ticker. **Map:** globe or flat map, auto-rotation and speed, night lights or plain surface, relief, stars, atmosphere, borders, country shading, hotspots, home label, arc style, arcs per second, arc height. *Reset view* and *Reset all*. Stored in the browser. At the bottom: *Log out* (this browser only). |
+| **⚙ Settings** | *Smooth playback* (default on): the gateway sends flows in batches every few seconds; the dashboard buffers them and replays them in real time with a few seconds of measured delay. **Alerts:** discovery and volume alerts, optional browser notifications (permission required). **Interface:** color scheme (night blue, graphite, black/OLED), direction colors (standard or colorblind-friendly), font size, panel opacity, hide stats or ticker. **Map:** globe or flat map, auto-rotation and speed, night lights or plain surface, relief, stars, atmosphere, borders, country shading, hotspots, home label, arc style, arcs per second, arc height. *Reset view* and *Reset all*. Display and browser-notification preferences are stored in the browser. At the bottom: *Log out* (this browser only). |
 | **System** | API, live stream and history availability; last stored NetFlow/IPFIX and firewall event; GeoIP city and ASN database age. Refreshes while open. |
 | **Filter chips** | Out / In (on), Blocked / Internal (off), DNS (off). Stored in the browser. |
 | **Ticker** | Upload ↑, download ↓ and duration per connection. On hover: ✎ rename, dossier for device, country, company or IP. Click zooms to the location, double-click opens the history for that IP. Header shows connections and volume per minute. |
@@ -262,8 +262,8 @@ history (incl. GeoIP). Then:
 | **Globe / map** | Countries are shaded by traffic in the last 24 h. Click a country or hotspot to open its dossier. The flat map (⚙ → Map → View) pans by dragging and zooms with the wheel. Both load finer borders (1:50m) and sharper texture tiles when zoomed in, only for the visible area. |
 | **Dossier** | For a country, device, company or IP: key numbers (connections, volume, IPs, devices, first/last seen, blocked), timeline, top lists and all **source → destination** pairs with service, count and volume. Range 1 h to 30 days. Click a pair for the individual connections. |
 | **Countries** | All countries as a sortable table. Click opens the dossier. |
-| **Devices** | All addresses with traffic in the selected range, including first/last seen, connections, volume, remote hosts and countries. Add or remove names (✎), also for external IPs (*+ Name for IP*, e.g. your VPS). Set an optional per-device volume alert in GiB; it triggers when that device exceeds the threshold in a rolling 24-hour window. The threshold is stored in this browser and alerts once per crossing, re-arming after the volume drops below the limit. |
-| **Discovery and volume alerts** | In-dashboard notification for a device not seen in 30 days or a first contact with a country/company in 30 days. New-device alerts start after the initial history scan; country/company first-contact alerts wait until there is at least one day of history. Volume limits are configured per device in the Devices table. Notifications can be disabled in Settings; volume checks run while the dashboard tab is visible. |
+| **Devices** | All addresses with traffic in the selected range, including first/last seen, connections, volume, remote hosts and countries. Add or remove names (✎), also for external IPs (*+ Name for IP*, e.g. your VPS). Add a group and note, then filter by name, IP, group or note. Set an optional per-device volume threshold in GiB with a rolling period of 1 h, 24 h or 7 days and direction of upload, download or both. These settings are shared by all dashboard browsers. |
+| **Discovery and volume alerts** | In-dashboard notification for a device not seen in 30 days or a first contact with a country/company in 30 days. New-device alerts start after the initial history scan; country/company first-contact alerts wait until there is at least one day of history. Alerts are archived for up to 90 days (maximum 1,000), shared by all browsers, and can be filtered, marked read or cleared. Browser notifications are optional; grant permission in Settings. Threshold monitoring runs while the dashboard is open, including a background tab, but not after the browser is closed. |
 | **History** (key `/`) | Full-text search over IP, device, country, city, provider, or plain LogsQL. |
 
 ![History](docs/history.png)
@@ -361,8 +361,9 @@ is also available for trusted networks or a TLS-terminating reverse proxy. For t
 - **Versions** are pinned (Vector 0.58.0, GoFlow2 v2.2.7, VictoriaLogs v1.53.0, Caddy 2.11). To bump,
   edit `docker-compose.yml` or `collector/Dockerfile`, then `update`. Note: `netsampler/goflow2:latest`
   points to the old 1.x with a different JSON format.
-- **Backup:** configs are in git. `.env` and `config/hosts.csv` are excluded on purpose, back those up.
-  The history is expendable.
+- **Backup:** configs are in git. `.env`, `config/hosts.csv` and `config/dashboard.json` are excluded on
+  purpose, back those up. The latter contains shared device groups/notes, thresholds and the alert
+  archive. The history is expendable.
 
 ## Security
 
@@ -442,10 +443,11 @@ lagezentrum.sh            setup · test · status · geoip · password · update
 collector/Dockerfile      Vector + GoFlow2 in one image
 collector/vector.yaml     pipeline: classification, syslog parser, GeoIP, sinks
 config/hosts.example.csv  template for device names
+config/dashboard.json    shared device settings and notification archive (created by the API)
 caddy/Caddyfile           web server, LAN restriction, security headers
 caddy/auth/               only for old basic auth from earlier versions
 scripts/geoip-update.sh   GeoIP download (runs in the geoip container)
-api/                      login + names API (Go, standard library only)
+api/                      login, names, shared device settings and alerts API (Go, standard library only)
 web/                      dashboard, login page, vendor/ (globe.gl, textures, fonts)
 docs/                     screenshots
 geoip/                    downloaded databases (not in git)

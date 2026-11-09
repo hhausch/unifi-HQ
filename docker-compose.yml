@@ -88,6 +88,7 @@ services:
     pid: "service:collector"         # sieht den Vector-Prozess
     environment:
       HOSTS_FILE: /config/hosts.csv
+      DASHBOARD_FILE: /config/dashboard.json
       LISTEN: 127.0.0.1:8092
       AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}   # ./lagezentrum.sh password
       AUTH_SECRET: ${AUTH_SECRET:-}

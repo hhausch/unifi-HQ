@@ -27,6 +27,7 @@
   </div>
   <button class="tool" id="openCountries" title="All countries at a glance">Countries</button>
   <button class="tool" id="openDevices" title="Devices and names">Devices</button>
+  <button class="tool" id="openAlerts" title="Notification archive">Alerts <span id="alertCount" hidden></span></button>
   <button class="tool" id="openHistory" title="Search history (/)">History</button>
   <button class="tool icon" id="openSettings" title="Settings" aria-label="Settings" aria-controls="settings">⚙</button>
   <div class="settings" id="settings" hidden role="dialog" aria-label="Settings">
@@ -34,6 +35,7 @@
       <h3>Live</h3>
       <label class="opt check"><input type="checkbox" id="optSmooth"> <span><b>Smooth playback</b><br><small>The gateway sends flows in batches. Buffer them and replay at the real pace, a few seconds behind. <span id="delayInfo"></span></small></span></label>
       <label class="opt check"><input type="checkbox" id="optAlerts"> <span><b>Discovery and volume alerts</b><br><small>Notify about newly seen devices, first contacts, and configured per-device 24-hour volume limits.</small></span></label>
+      <label class="opt check"><input type="checkbox" id="optBrowserNotifications"> <span><b>Browser notifications</b><br><small id="browserNotificationState">Show alerts while this dashboard is in the background. Requires permission.</small></span></label>
     </div>
 
     <div class="set-group">
@@ -221,7 +223,7 @@
   <div class="drawer-box">
     <div class="drawer-head">
       <div class="ds-head"><div class="kicker">Inventory</div><h2 id="devTitle">Devices &amp; names</h2></div>
-      <input id="devFilter" type="search" placeholder="Filter …" aria-label="Filter devices">
+      <input id="devFilter" type="search" placeholder="Name, IP, group, note …" aria-label="Filter devices">
       <select id="devRange" aria-label="Time range">
         <option value="24h" selected>24 hours</option>
         <option value="7d">7 days</option>
@@ -230,13 +232,33 @@
       <button class="tool" id="devAdd">+ Name for IP</button>
       <button class="tool" id="devClose" aria-label="Close">✕</button>
     </div>
-    <div class="result-info" id="devInfo"></div>
+    <div class="result-info" id="devInfo">Group and notes are shared by all dashboard browsers. Volume limits use the selected period and direction.</div>
     <div class="table-wrap">
       <table class="grid" id="devTable">
-        <thead><tr><th>Name</th><th>IP address</th><th class="num">Connections</th><th class="num">Volume</th><th class="num">Remote hosts</th><th class="num">Countries</th><th>First seen</th><th>Last seen</th><th class="num">Alert at (GiB / 24 h)</th></tr></thead>
+        <thead><tr><th>Name</th><th>IP address</th><th>Group</th><th>Notes</th><th class="num">Connections</th><th class="num">Volume</th><th class="num">Remote hosts</th><th class="num">Countries</th><th>First seen</th><th>Last seen</th><th>Period</th><th>Direction</th><th class="num">Alert at (GiB)</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<div class="drawer" id="alerts" hidden role="dialog" aria-modal="true" aria-labelledby="alertTitle">
+  <div class="drawer-box">
+    <div class="drawer-head">
+      <div class="ds-head"><div class="kicker">Notifications</div><h2 id="alertTitle">Alert archive</h2></div>
+      <select id="alertFilter" aria-label="Filter alerts">
+        <option value="all">All notifications</option>
+        <option value="unread">Unread</option>
+        <option value="device">Devices</option>
+        <option value="first-contact">First contacts</option>
+        <option value="volume">Volume limits</option>
+      </select>
+      <button class="tool" id="alertsRead">Mark all read</button>
+      <button class="tool" id="alertsClear">Clear archive</button>
+      <button class="tool" id="alertsClose" aria-label="Close">✕</button>
+    </div>
+    <div class="result-info" id="alertInfo"></div>
+    <ul class="alert-list" id="alertList"></ul>
   </div>
 </div>
 

@@ -6,7 +6,7 @@
 #   ./proxmox/update-lxc.sh <CTID>        (ohne CTID: sucht den CT mit Hostname "lagezentrum")
 #
 # Kopiert den aktuellen Stand nach /opt/lagezentrum im Container und baut/startet neu.
-# Deine Einstellungen bleiben unangetastet: .env (inkl. Login-Passwort), config/hosts.csv, GeoIP-Daten, Historie.
+# Deine Einstellungen bleiben unangetastet: .env, config/hosts.csv, dashboard.json, GeoIP-Daten, Historie.
 set -euo pipefail
 
 ok() { printf '\033[32m✔\033[0m %s\n' "$*"; }
@@ -31,7 +31,7 @@ fi
 
 tmp=$(mktemp --suffix=.tar.gz)
 trap 'rm -f "$tmp"' EXIT
-tar -C "$here" --exclude=.git --exclude=./.env --exclude=./config/hosts.csv \
+tar -C "$here" --exclude=.git --exclude=./.env --exclude=./config/hosts.csv --exclude=./config/dashboard.json \
   --exclude='./geoip/*.mmdb' --exclude='./caddy/auth/*.caddy' -czf "$tmp" .
 pct push "$CTID" "$tmp" /root/lagezentrum-update.tar.gz
 pct exec "$CTID" -- tar -xzf /root/lagezentrum-update.tar.gz -C /opt/lagezentrum

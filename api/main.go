@@ -7,6 +7,7 @@
 //	DELETE /api/names?ip=10.37.10.3
 //	GET    /api/health
 //	GET    /api/status            -> service and data-source status (requires login)
+//	/api/dashboard/*              -> device preferences, threshold checks and alert archive
 //
 // Dazu der Login (auth.go): /auth/login, /auth/logout, /auth/session, /auth/check.
 // "lz-api hash-password" liest ein Passwort von stdin und gibt den Hash für die .env aus.
@@ -313,6 +314,7 @@ func main() {
 		return
 	}
 	s := &store{path: env("HOSTS_FILE", "/config/hosts.csv")}
+	dashboard := newDashboardStore(env("DASHBOARD_FILE", "/config/dashboard.json"))
 	addr := env("LISTEN", "127.0.0.1:8092")
 	auth := newAuth(
 		os.Getenv("AUTH_PASSWORD_HASH"),
@@ -331,6 +333,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	auth.routes(mux)
+	dashboard.routes(mux, auth)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]string{"status": "ok"})
 	})

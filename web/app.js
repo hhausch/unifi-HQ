@@ -69,15 +69,13 @@
 
   // Benutzer-Einstellungen (Zahnrad oben rechts), pro Browser gespeichert
   const DEFAULT_SETTINGS = { smooth: true, arcStyle: 'strong', arcRate: 10, choropleth: true, alerts: true,
-    volumeThresholds: {}, volumeAlerted: {},
+    browserNotifications: false,
     // Oberfläche
     theme: 'navy', palette: 'default', uiScale: 1, panelAlpha: 0.76, showLeft: true, showRight: true,
     // Globus
     view: 'globe', autoRotate: !reduceMotion, rotateSpeed: 0.3, globeStyle: 'night', relief: true, stars: true, atmosphere: true,
     borders: true, points: true, homeLabel: true, arcHeight: 0.38 };
   const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
-  settings.volumeThresholds = Object.assign({}, settings.volumeThresholds);
-  settings.volumeAlerted = Object.assign({}, settings.volumeAlerted);
   if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
 
   // Farbschema, Richtungsfarben, Schriftgröße, Leisten – alles über CSS-Variablen und Klassen
@@ -537,11 +535,10 @@
         inbound: vl(`${T} dir:"in" leg:req | stats by (dport, proto) count() as v | sort by (v desc) | limit 6`),
         cAll: vl(`${T} (dir:out or dir:"in") r_country:* | stats by (r_country) count() if (leg:req) as n, sum(bytes) as b`)
       };
-      if (Object.keys(settings.volumeThresholds || {}).length) {
-        vl(`${T} -dir:blocked | stats by (local_ip) sum(bytes) as b`)
-          .then(checkVolumeThresholds)
-          .catch(err => console.warn('Volume thresholds not checked:', err));
-      }
+      if (settings.alerts) checkVolumeThresholds().catch(err => {
+        console.warn('Volume thresholds not checked:', err);
+        toast(`Volume thresholds could not be checked: ${err.message || err}`, null, 'info');
+      });
       if (filters.blocked) {
         jobs.cBlk = vl(`${T} dir:blocked | stats by (r_country, r_country_name) count() as v | sort by (v desc) | limit 6`);
         jobs.ports = vl(`${T} dir:blocked | stats by (dport) count() as v | sort by (v desc) | limit 6`);
@@ -874,7 +871,59 @@
 
   // ---------- Namen (im Dashboard vergeben, gespeichert über /api/names) ----------
   const names = new Map();
+  const devicePrefs = new Map();
+  let alertRecords = [];
   const nameOf = (ip, fallback) => (ip && names.get(ip)) || fallback || ip || '';
+  async function dashboardApi(path, options = {}) {
+    const headers = Object.assign({}, options.headers || {});
+    if (options.body) headers['Content-Type'] = 'application/json';
+    const r = await fetch(path, Object.assign({ cache: 'no-store' }, options, { headers }));
+    if (r.status === 401) toLogin();
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    return data;
+  }
+  const devicePref = ip => devicePrefs.get(ip) || { group: '', note: '', volumeThresholdGiB: 0, volumePeriod: '24h', volumeDirection: 'both' };
+  async function loadDashboardData() {
+    if (isDemo) {
+      alertRecords = [];
+      renderAlerts();
+      syncBrowserNotificationSetting();
+      return;
+    }
+    const state = await dashboardApi('api/dashboard');
+    devicePrefs.clear();
+    Object.entries(state.devices || {}).forEach(([ip, pref]) => devicePrefs.set(ip, pref));
+    alertRecords = Array.isArray(state.alerts) ? state.alerts : [];
+    const legacy = settings.volumeThresholds || {};
+    for (const [ip, threshold] of Object.entries(legacy)) {
+      if (!devicePrefs.get(ip)?.volumeThresholdGiB && +threshold > 0) {
+        await saveDevicePref(ip, Object.assign(devicePref(ip), { volumeThresholdGiB: +threshold }));
+      }
+    }
+    if ('volumeThresholds' in settings || 'volumeAlerted' in settings) {
+      delete settings.volumeThresholds;
+      delete settings.volumeAlerted;
+      saveSettings();
+    }
+    renderAlerts();
+    syncBrowserNotificationSetting();
+  }
+  async function saveDevicePref(ip, pref) {
+    const body = {
+      ip, group: pref.group || '', note: pref.note || '',
+      volumeThresholdGiB: +pref.volumeThresholdGiB || 0,
+      volumePeriod: pref.volumePeriod || '24h',
+      volumeDirection: pref.volumeDirection || 'both'
+    };
+    if (isDemo) {
+      devicePrefs.set(ip, body);
+      return body;
+    }
+    const saved = await dashboardApi('api/dashboard/device', { method: 'PUT', body: JSON.stringify(body) });
+    devicePrefs.set(ip, saved.device);
+    return saved.device;
+  }
   async function loadNames() {
     if (isDemo) return;
     try {
@@ -1117,7 +1166,11 @@
   $('devAdd').addEventListener('click', () => { const ip = prompt('IP address (local or external):'); if (ip) editName(ip.trim()); });
   let devRows = [];
   async function loadDevices() {
-    await loadNames();
+    try { await Promise.all([loadNames(), loadDashboardData()]); }
+    catch (err) {
+      $('devInfo').textContent = `Could not load shared device settings: ${err.message || err}`;
+      return;
+    }
     let seen = isDemo ? [...demo.devices.values()].map(r => ({ local_ip: r.local_ip, n: 1, b: r.v })) : [];
     if (!isDemo) {
       try {
@@ -1127,14 +1180,18 @@
     }
     const m = new Map(seen.map(r => [r.local_ip, r]));
     for (const ip of names.keys()) if (!m.has(ip)) m.set(ip, { local_ip: ip, n: 0, b: 0, external: !isPrivate(ip) });
-    for (const ip of Object.keys(settings.volumeThresholds || {})) if (!m.has(ip)) m.set(ip, { local_ip: ip, n: 0, b: 0, external: !isPrivate(ip) });
+    for (const ip of devicePrefs.keys()) if (!m.has(ip)) m.set(ip, { local_ip: ip, n: 0, b: 0, external: !isPrivate(ip) });
     devRows = [...m.values()];
     renderDevices();
   }
   const isPrivate = ip => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|169\.254\.|f[cd]|fe80)/i.test(ip);
   function renderDevices() {
     const f = $('devFilter').value.trim().toLowerCase();
-    const rows = devRows.filter(r => !f || r.local_ip.toLowerCase().includes(f) || (names.get(r.local_ip) || '').toLowerCase().includes(f));
+    const rows = devRows.filter(r => {
+      const pref = devicePref(r.local_ip);
+      return !f || r.local_ip.toLowerCase().includes(f) || (names.get(r.local_ip) || '').toLowerCase().includes(f) ||
+        pref.group.toLowerCase().includes(f) || pref.note.toLowerCase().includes(f);
+    });
     const unnamed = devRows.filter(r => !names.has(r.local_ip) && +r.n > 0).length;
     $('devInfo').textContent = `${devRows.length} addresses · ${names.size} named · ${unnamed} active without a name`;
     document.querySelector('#devTable tbody').replaceChildren(...rows.map(r => {
@@ -1142,35 +1199,63 @@
       const nm = el('td'); const n = names.get(r.local_ip);
       if (n) nm.append(el('b', null, n)); else nm.append(el('span', 'unnamed', 'unnamed'));
       nm.append(nameBtn(r.local_ip));
+      const pref = devicePref(r.local_ip);
+      const group = el('input', 'device-setting');
+      group.type = 'text'; group.maxLength = 64; group.placeholder = 'e.g. Servers'; group.value = pref.group || '';
+      group.setAttribute('aria-label', `Group for ${nameOf(r.local_ip)}`);
+      const note = el('input', 'device-setting device-note');
+      note.type = 'text'; note.maxLength = 240; note.placeholder = 'Add a note'; note.value = pref.note || '';
+      note.setAttribute('aria-label', `Notes for ${nameOf(r.local_ip)}`);
+      const period = el('select', 'device-setting');
+      [['1h', '1 h'], ['24h', '24 h'], ['7d', '7 days']].forEach(([value, label]) => {
+        const option = el('option', null, label); option.value = value; period.append(option);
+      });
+      period.value = pref.volumePeriod || '24h';
+      period.setAttribute('aria-label', `Volume alert period for ${nameOf(r.local_ip)}`);
+      const direction = el('select', 'device-setting');
+      [['both', 'Up + down'], ['out', 'Upload'], ['in', 'Download']].forEach(([value, label]) => {
+        const option = el('option', null, label); option.value = value; direction.append(option);
+      });
+      direction.value = pref.volumeDirection || 'both';
+      direction.setAttribute('aria-label', `Volume alert direction for ${nameOf(r.local_ip)}`);
       const threshold = el('td', 'num');
       const thresholdInput = el('input', 'volume-threshold');
-      thresholdInput.type = 'number'; thresholdInput.min = '0.1'; thresholdInput.step = '0.1';
-      thresholdInput.placeholder = 'Off'; thresholdInput.value = settings.volumeThresholds?.[r.local_ip] || '';
-      thresholdInput.setAttribute('aria-label', `24-hour volume alert threshold for ${nameOf(r.local_ip)}`);
-      thresholdInput.title = 'GiB in the rolling last 24 hours; leave empty to disable';
-      thresholdInput.addEventListener('click', ev => ev.stopPropagation());
-      thresholdInput.addEventListener('keydown', ev => ev.stopPropagation());
-      thresholdInput.addEventListener('change', () => {
-        const value = thresholdInput.value.trim();
-        if (!value) {
-          delete settings.volumeThresholds[r.local_ip];
-          delete settings.volumeAlerted[r.local_ip];
-        } else {
-          const thresholdGiB = Number(value);
-          if (!Number.isFinite(thresholdGiB) || thresholdGiB <= 0) {
-            thresholdInput.value = settings.volumeThresholds?.[r.local_ip] || '';
+      thresholdInput.type = 'number'; thresholdInput.min = '0'; thresholdInput.step = '0.1';
+      thresholdInput.placeholder = 'Off'; thresholdInput.value = +pref.volumeThresholdGiB || '';
+      thresholdInput.setAttribute('aria-label', `Volume alert threshold in GiB for ${nameOf(r.local_ip)}`);
+      thresholdInput.title = 'GiB in the selected rolling period; enter 0 or leave empty to disable';
+      const controls = [group, note, period, direction, thresholdInput];
+      controls.forEach(control => {
+        control.addEventListener('click', ev => ev.stopPropagation());
+        control.addEventListener('keydown', ev => ev.stopPropagation());
+        control.addEventListener('change', async () => {
+          const value = thresholdInput.value.trim();
+          const thresholdGiB = value === '' ? 0 : Number(value);
+          if (!Number.isFinite(thresholdGiB) || thresholdGiB < 0 || thresholdGiB > 1_000_000) {
+            thresholdInput.value = +devicePref(r.local_ip).volumeThresholdGiB || '';
             return;
           }
-          settings.volumeThresholds[r.local_ip] = thresholdGiB;
-          delete settings.volumeAlerted[r.local_ip];
-        }
-        saveSettings();
-        loadStats();
+          try {
+            await saveDevicePref(r.local_ip, {
+              group: group.value, note: note.value, volumePeriod: period.value,
+              volumeDirection: direction.value, volumeThresholdGiB: thresholdGiB
+            });
+            await checkVolumeThresholds();
+          } catch (err) {
+            toast(`Could not save device settings: ${err.message || err}`, null, 'info');
+            loadDevices();
+          }
+        });
       });
+      const groupCell = el('td'); groupCell.append(group);
+      const noteCell = el('td'); noteCell.append(note);
+      const periodCell = el('td'); periodCell.append(period);
+      const directionCell = el('td'); directionCell.append(direction);
       threshold.append(thresholdInput);
-      tr.append(nm, el('td', 'mono', r.local_ip + (r.external ? ' (external)' : '')), el('td', 'num', nf.format(+r.n || 0)), el('td', 'num', fmtBytes(r.b)),
+      tr.append(nm, el('td', 'mono', r.local_ip + (r.external ? ' (external)' : '')), groupCell, noteCell, el('td', 'num', nf.format(+r.n || 0)), el('td', 'num', fmtBytes(r.b)),
         el('td', 'num', nf.format(+r.rips || 0)), el('td', 'num', nf.format(+r.cc || 0)),
-        el('td', 'mono', r.first ? fmtWhen(r.first) : '–'), el('td', 'mono', r.last ? fmtWhen(r.last) : '–'), threshold);
+        el('td', 'mono', r.first ? fmtWhen(r.first) : '–'), el('td', 'mono', r.last ? fmtWhen(r.last) : '–'),
+        periodCell, directionCell, threshold);
       return tr;
     }));
   }
@@ -1641,47 +1726,55 @@
   function checkFirstContact(e) {
     if (e.dir !== 'out' && e.dir !== 'in') return;
     const who = e.local_name || e.local_ip;
+    const alertWindow = Math.floor(Date.now() / (30 * 86400000));
     if (known.devicesReady && e.local_ip && !known.devices.has(e.local_ip)) {
       known.devices.add(e.local_ip); e.isNew = true;
-      if (settings.alerts) toast(`Device not seen in 30 days: ${who} (${e.local_ip})`, () => openDossier('device', e.local_ip), 'new');
+      if (settings.alerts) recordAlert({
+        key: `device:${e.local_ip}:${alertWindow}`,
+        type: 'device', title: 'Device not seen in 30 days', detail: `${who} (${e.local_ip})`,
+        ip: e.local_ip, targetType: 'device', targetValue: e.local_ip
+      });
     }
     if (!known.ready) return;
     if (e.r_country && !known.countries.has(e.r_country)) {
       known.countries.add(e.r_country); e.isNew = true;
-      if (settings.alerts) toast(`First contact with ${flag(e.r_country)} ${country(e.r_country)}: ${who} → ${e.r_org || e.remote_ip}`, () => openDossier('country', e.r_country), 'new');
+      if (settings.alerts) recordAlert({
+        key: `first-contact:country:${e.local_ip}:${e.r_country}:${alertWindow}`,
+        type: 'first-contact', title: `First contact with ${country(e.r_country)}`,
+        detail: `${who} → ${e.r_org || e.remote_ip}`, ip: e.local_ip,
+        targetType: 'country', targetValue: e.r_country
+      });
     } else if (e.r_org && !known.orgs.has(e.r_org)) {
       known.orgs.add(e.r_org); e.isNew = true;
-      if (settings.alerts) toast(`New remote: ${e.r_org} (${flag(e.r_country)} ${country(e.r_country)}) from ${who}`, () => openDossier('org', e.r_org), 'new');
+      if (settings.alerts) recordAlert({
+        key: `first-contact:org:${e.local_ip}:${e.r_org}:${alertWindow}`,
+        type: 'first-contact', title: `New remote: ${e.r_org}`,
+        detail: `${flag(e.r_country)} ${country(e.r_country)} · from ${who}`, ip: e.local_ip,
+        targetType: 'org', targetValue: e.r_org
+      });
     }
   }
 
-  function checkVolumeThresholds(rows) {
-    const totals = new Map(rows.map(r => [r.local_ip, +r.b || 0]));
-    let changed = false;
-    for (const [ip, raw] of Object.entries(settings.volumeThresholds || {})) {
-      const thresholdGiB = Number(raw);
-      if (!Number.isFinite(thresholdGiB) || thresholdGiB <= 0) continue;
-      const overLimit = (totals.get(ip) || 0) >= thresholdGiB * 1024 ** 3;
-      if (overLimit && Number(settings.volumeAlerted[ip]) !== thresholdGiB) {
-        settings.volumeAlerted[ip] = thresholdGiB;
-        changed = true;
-        if (settings.alerts) {
-          const total = totals.get(ip) || 0;
-          toast(`${nameOf(ip)} used ${fmtBytes(total)} in 24 h (limit ${fmtBytes(thresholdGiB * 1024 ** 3)})`,
-            () => openDossier('device', ip), 'limit');
-        }
-      } else if (!overLimit && ip in settings.volumeAlerted) {
-        delete settings.volumeAlerted[ip];
-        changed = true;
-      }
+  async function checkVolumeThresholds() {
+    if (isDemo || !settings.alerts) return;
+    const configs = [...devicePrefs].filter(([, pref]) => +pref.volumeThresholdGiB > 0);
+    if (!configs.length) return;
+    const groups = new Map();
+    for (const [ip, pref] of configs) {
+      const period = pref.volumePeriod || '24h', direction = pref.volumeDirection || 'both';
+      const key = `${period}:${direction}`;
+      if (!groups.has(key)) groups.set(key, { period, direction, ips: [] });
+      groups.get(key).ips.push(ip);
     }
-    for (const ip of Object.keys(settings.volumeAlerted)) {
-      if (!(ip in (settings.volumeThresholds || {}))) {
-        delete settings.volumeAlerted[ip];
-        changed = true;
-      }
-    }
-    if (changed) saveSettings();
+    const samples = [];
+    await Promise.all([...groups.values()].map(async ({ period, direction, ips }) => {
+      const dir = direction === 'both' ? '(dir:out or dir:"in")' : `dir:${direction === 'in' ? '"in"' : direction}`;
+      const rows = await vl(`_time:${period} ${dir} | stats by (local_ip) sum(bytes) as b`, 5000);
+      const totals = new Map(rows.map(r => [r.local_ip, +r.b || 0]));
+      ips.forEach(ip => samples.push({ ip, period, direction, bytes: totals.get(ip) || 0 }));
+    }));
+    const result = await dashboardApi('api/dashboard/volume-check', { method: 'POST', body: JSON.stringify({ samples }) });
+    (result.alerts || []).forEach(alert => { showAlert(alert); });
   }
 
   // ---------- Meldungen ----------
@@ -1696,13 +1789,151 @@
     setTimeout(() => t.remove(), 9600);
   }
 
+  const alertDrawer = $('alerts');
+  const alertTypeLabel = type => type === 'device' ? 'Device' : type === 'volume' ? 'Volume limit' : 'First contact';
+  function updateAlertCount() {
+    const unread = alertRecords.filter(a => !a.read).length;
+    const badge = $('alertCount');
+    badge.hidden = !unread;
+    badge.textContent = unread ? String(unread) : '';
+  }
+  function renderAlerts() {
+    const filter = $('alertFilter').value;
+    const rows = alertRecords.filter(a => filter === 'all' || (filter === 'unread' ? !a.read : a.type === filter));
+    $('alertInfo').textContent = `${alertRecords.length} archived · ${alertRecords.filter(a => !a.read).length} unread · retained for 90 days`;
+    const list = $('alertList');
+    if (!rows.length) list.replaceChildren(el('li', 'empty', 'No notifications match this filter.'));
+    else list.replaceChildren(...rows.map(alert => {
+      const item = el('li', alert.read ? '' : 'unread');
+      const time = el('time', null, fmtWhen(alert.createdAt));
+      const type = el('span', 'alert-type', alertTypeLabel(alert.type));
+      const content = el('div');
+      content.append(el('div', 'alert-title', alert.title), el('div', 'alert-detail', alert.detail));
+      const actions = el('div', 'alert-actions');
+      if (alert.targetType && alert.targetValue) {
+        const open = el('button', null, 'Open');
+        open.addEventListener('click', async () => {
+          await markAlertsRead([alert.id]);
+          openDossier(alert.targetType, alert.targetValue);
+        });
+        actions.append(open);
+      }
+      if (!alert.read) {
+        const read = el('button', null, 'Read');
+        read.addEventListener('click', () => markAlertsRead([alert.id]));
+        actions.append(read);
+      }
+      item.append(time, type, content, actions);
+      return item;
+    }));
+    updateAlertCount();
+  }
+  async function refreshAlerts() {
+    alertRecords = await dashboardApi('api/dashboard/alerts');
+    renderAlerts();
+  }
+  async function refreshDevicePreferences() {
+    const devices = await dashboardApi('api/dashboard/devices');
+    devicePrefs.clear();
+    Object.entries(devices || {}).forEach(([ip, pref]) => devicePrefs.set(ip, pref));
+  }
+  async function markAlertsRead(ids, all = false) {
+    try {
+      await dashboardApi('api/dashboard/alerts', { method: 'PATCH', body: JSON.stringify({ ids, all }) });
+      alertRecords.forEach(alert => { if (all || ids.includes(alert.id)) alert.read = true; });
+      renderAlerts();
+    } catch (err) {
+      console.warn('Could not update alert archive:', err);
+      toast(`Could not update alert archive: ${err.message || err}`, null, 'info');
+    }
+  }
+  async function showAlert(alert) {
+    if (!alertRecords.some(item => item.id === alert.id)) alertRecords.unshift(alert);
+    renderAlerts();
+    const open = alert.targetType && alert.targetValue
+      ? () => { markAlertsRead([alert.id]); openDossier(alert.targetType, alert.targetValue); }
+      : null;
+    toast(`${alert.title}: ${alert.detail}`, open, alert.type === 'volume' ? 'limit' : 'new');
+    if (settings.browserNotifications && 'Notification' in window && Notification.permission === 'granted') {
+      const notification = new Notification(alert.title, { body: alert.detail, tag: alert.key });
+      notification.onclick = () => {
+        window.focus();
+        if (open) open();
+        notification.close();
+      };
+    }
+  }
+  async function recordAlert(input) {
+    if (isDemo) return;
+    try {
+      const result = await dashboardApi('api/dashboard/alerts', { method: 'POST', body: JSON.stringify(input) });
+      if (result.created) await showAlert(result.alert);
+    } catch (err) {
+      console.warn('Could not save notification:', err);
+      toast(`Could not save notification: ${err.message || err}`, null, 'info');
+    }
+  }
+  $('openAlerts').addEventListener('click', async () => {
+    showOverlay(alertDrawer);
+    try { await refreshAlerts(); } catch (err) { $('alertInfo').textContent = `Could not load archive: ${err.message || err}`; }
+  });
+  $('alertsClose').addEventListener('click', () => hideOverlay(alertDrawer));
+  alertDrawer.addEventListener('click', ev => { if (ev.target === alertDrawer) hideOverlay(alertDrawer); });
+  $('alertFilter').addEventListener('change', renderAlerts);
+  $('alertsRead').addEventListener('click', () => markAlertsRead([], true));
+  $('alertsClear').addEventListener('click', async () => {
+    if (!confirm('Clear the notification archive for all dashboard browsers?')) return;
+    try {
+      await dashboardApi('api/dashboard/alerts', { method: 'DELETE' });
+      alertRecords = [];
+      renderAlerts();
+    } catch (err) {
+      toast(`Could not clear alert archive: ${err.message || err}`, null, 'info');
+    }
+  });
+
+  function syncBrowserNotificationSetting() {
+    const input = $('optBrowserNotifications');
+    const supported = 'Notification' in window && window.isSecureContext;
+    input.checked = !!settings.browserNotifications && supported && Notification.permission === 'granted';
+    input.disabled = !supported || Notification.permission === 'denied';
+    $('browserNotificationState').textContent = !supported
+      ? 'Requires a secure HTTPS dashboard and browser notification support.'
+      : Notification.permission === 'denied'
+        ? 'Notifications are blocked in browser settings.'
+        : 'Show alerts while this dashboard is open in another tab.';
+  }
+  $('optBrowserNotifications').addEventListener('change', async ev => {
+    if (!ev.target.checked) {
+      settings.browserNotifications = false;
+      saveSettings();
+      syncBrowserNotificationSetting();
+      return;
+    }
+    if (!('Notification' in window) || !window.isSecureContext) {
+      settings.browserNotifications = false;
+      toast('Browser notifications require a supported browser and HTTPS.', null, 'info');
+    } else {
+      try {
+        const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+        settings.browserNotifications = permission === 'granted';
+        if (!settings.browserNotifications) toast('Allow notifications in browser settings to enable them.', null, 'info');
+      } catch (err) {
+        settings.browserNotifications = false;
+        toast(`Could not enable browser notifications: ${err.message || err}`, null, 'info');
+      }
+    }
+    saveSettings();
+    syncBrowserNotificationSetting();
+  });
+
   // ---------- Einstellungen ----------
   const setBox = $('settings');
   const fmtDec = (v, d = 1) => (+v).toFixed(d);
   // Bedienelement -> Einstellung; „ui“ = Oberfläche neu anwenden, „globe“ = Globus neu anwenden
   const OPTS = [
     { id: 'optSmooth', key: 'smooth', type: 'check', after: () => { if (!settings.smooth) flushPending(); } },
-    { id: 'optAlerts', key: 'alerts', type: 'check' },
+    { id: 'optAlerts', key: 'alerts', type: 'check', after: () => { if (settings.alerts) loadStats(); } },
     { id: 'optTheme', key: 'theme', type: 'select', ui: true, globe: true },
     { id: 'optPalette', key: 'palette', type: 'select', ui: true, globe: true, after: () => renderSpark() },
     { id: 'optScale', key: 'uiScale', type: 'select', num: true, ui: true },
@@ -1757,9 +1988,11 @@
     else if (world) { pauseRotation(); world.pointOfView(homeView(), 1200); }
   });
   $('resetSettings').addEventListener('click', () => {
-    Object.assign(settings, DEFAULT_SETTINGS, { volumeThresholds: {}, volumeAlerted: {} });
+    Object.assign(settings, DEFAULT_SETTINGS);
     if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
-    applyUiSettings(); applyGlobeSettings(); renderSpark(); syncSettingsUi(); saveSettings();
+    delete settings.volumeThresholds;
+    delete settings.volumeAlerted;
+    applyUiSettings(); applyGlobeSettings(); renderSpark(); syncSettingsUi(); syncBrowserNotificationSetting(); saveSettings();
   });
   $('sparkTitle').addEventListener('click', () => { sparkMode = sparkMode === 'bytes' ? 'hits' : 'bytes'; store.set('sparkMode', sparkMode); renderSpark(); });
 
@@ -1808,9 +2041,21 @@
     } else {
       checkSession().then(s => { $('logoutRow').hidden = !(s && s.enabled); });
       setInterval(checkSession, 6 * 3600 * 1000);
-      loadNames().then(() => { connect(); loadStats(); });
+      Promise.all([loadNames(), loadDashboardData().catch(err => {
+        console.warn('Dashboard settings not loaded:', err);
+        toast(`Shared dashboard settings unavailable: ${err.message || err}`, null, 'info');
+      })]).then(() => { connect(); loadStats(); });
       loadKnown();
-      setInterval(loadStats, CONFIG.statsEveryMs);
+      setInterval(async () => {
+        try {
+          await refreshDevicePreferences();
+          if (document.hidden) await checkVolumeThresholds();
+          else loadStats();
+          if (!alertDrawer.hidden) await refreshAlerts();
+        } catch (err) {
+          console.warn('Dashboard refresh failed:', err);
+        }
+      }, CONFIG.statsEveryMs);
       document.addEventListener('visibilitychange', () => { if (!document.hidden) loadStats(); });
       // Filter für Abgewehrt/Intern einschalten lädt deren Statistik sofort nach
       document.querySelectorAll('.chip[data-f="blocked"], .chip[data-f="internal"]').forEach(b => b.addEventListener('click', () => { if (filters[b.dataset.f]) loadStats(); }));

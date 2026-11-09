@@ -63,10 +63,10 @@
 		}
 
 		handle /api/* {
-			@bad not method GET PUT DELETE
+			@bad not method GET PUT POST PATCH DELETE
 			respond @bad 405
 			request_body {
-				max_size 8KB
+				max_size 256KB
 			}
 			reverse_proxy 127.0.0.1:8092
 		}
