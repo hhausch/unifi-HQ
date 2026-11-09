@@ -33,7 +33,7 @@
     <div class="set-group">
       <h3>Live</h3>
       <label class="opt check"><input type="checkbox" id="optSmooth"> <span><b>Smooth playback</b><br><small>The gateway sends flows in batches. Buffer them and replay at the real pace, a few seconds behind. <span id="delayInfo"></span></small></span></label>
-      <label class="opt check"><input type="checkbox" id="optAlerts"> <span><b>First-contact alerts</b><br><small>Notify when a device contacts a country or company for the first time in 30 days.</small></span></label>
+      <label class="opt check"><input type="checkbox" id="optAlerts"> <span><b>Discovery and volume alerts</b><br><small>Notify about newly seen devices, first contacts, and configured per-device 24-hour volume limits.</small></span></label>
     </div>
 
     <div class="set-group">
@@ -233,7 +233,7 @@
     <div class="result-info" id="devInfo"></div>
     <div class="table-wrap">
       <table class="grid" id="devTable">
-        <thead><tr><th>Name</th><th>IP address</th><th class="num">Connections</th><th class="num">Volume</th><th class="num">Remote hosts</th><th class="num">Countries</th><th>Last seen</th></tr></thead>
+        <thead><tr><th>Name</th><th>IP address</th><th class="num">Connections</th><th class="num">Volume</th><th class="num">Remote hosts</th><th class="num">Countries</th><th>First seen</th><th>Last seen</th><th class="num">Alert at (GiB / 24 h)</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>

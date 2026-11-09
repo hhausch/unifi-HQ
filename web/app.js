@@ -69,12 +69,15 @@
 
   // Benutzer-Einstellungen (Zahnrad oben rechts), pro Browser gespeichert
   const DEFAULT_SETTINGS = { smooth: true, arcStyle: 'strong', arcRate: 10, choropleth: true, alerts: true,
+    volumeThresholds: {}, volumeAlerted: {},
     // Oberfläche
     theme: 'navy', palette: 'default', uiScale: 1, panelAlpha: 0.76, showLeft: true, showRight: true,
     // Globus
     view: 'globe', autoRotate: !reduceMotion, rotateSpeed: 0.3, globeStyle: 'night', relief: true, stars: true, atmosphere: true,
     borders: true, points: true, homeLabel: true, arcHeight: 0.38 };
   const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
+  settings.volumeThresholds = Object.assign({}, settings.volumeThresholds);
+  settings.volumeAlerted = Object.assign({}, settings.volumeAlerted);
   if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
 
   // Farbschema, Richtungsfarben, Schriftgröße, Leisten – alles über CSS-Variablen und Klassen
@@ -534,6 +537,11 @@
         inbound: vl(`${T} dir:"in" leg:req | stats by (dport, proto) count() as v | sort by (v desc) | limit 6`),
         cAll: vl(`${T} (dir:out or dir:"in") r_country:* | stats by (r_country) count() if (leg:req) as n, sum(bytes) as b`)
       };
+      if (Object.keys(settings.volumeThresholds || {}).length) {
+        vl(`${T} -dir:blocked | stats by (local_ip) sum(bytes) as b`)
+          .then(checkVolumeThresholds)
+          .catch(err => console.warn('Volume thresholds not checked:', err));
+      }
       if (filters.blocked) {
         jobs.cBlk = vl(`${T} dir:blocked | stats by (r_country, r_country_name) count() as v | sort by (v desc) | limit 6`);
         jobs.ports = vl(`${T} dir:blocked | stats by (dport) count() as v | sort by (v desc) | limit 6`);
@@ -1114,11 +1122,12 @@
     if (!isDemo) {
       try {
         $('devInfo').textContent = 'Loading …';
-        seen = await vl(`_time:${$('devRange').value} -dir:blocked | stats by (local_ip) count() if (leg:req) as n, sum(bytes) as b, count_uniq(r_country) as cc, count_uniq(remote_ip) as rips, max(_time) as last | sort by (b desc) | limit 500`);
+        seen = await vl(`_time:${$('devRange').value} -dir:blocked | stats by (local_ip) count() if (leg:req) as n, sum(bytes) as b, count_uniq(r_country) as cc, count_uniq(remote_ip) as rips, min(_time) as first, max(_time) as last | sort by (b desc) | limit 500`);
       } catch (err) { $('devInfo').textContent = String(err.message || err); }
     }
     const m = new Map(seen.map(r => [r.local_ip, r]));
     for (const ip of names.keys()) if (!m.has(ip)) m.set(ip, { local_ip: ip, n: 0, b: 0, external: !isPrivate(ip) });
+    for (const ip of Object.keys(settings.volumeThresholds || {})) if (!m.has(ip)) m.set(ip, { local_ip: ip, n: 0, b: 0, external: !isPrivate(ip) });
     devRows = [...m.values()];
     renderDevices();
   }
@@ -1133,8 +1142,35 @@
       const nm = el('td'); const n = names.get(r.local_ip);
       if (n) nm.append(el('b', null, n)); else nm.append(el('span', 'unnamed', 'unnamed'));
       nm.append(nameBtn(r.local_ip));
+      const threshold = el('td', 'num');
+      const thresholdInput = el('input', 'volume-threshold');
+      thresholdInput.type = 'number'; thresholdInput.min = '0.1'; thresholdInput.step = '0.1';
+      thresholdInput.placeholder = 'Off'; thresholdInput.value = settings.volumeThresholds?.[r.local_ip] || '';
+      thresholdInput.setAttribute('aria-label', `24-hour volume alert threshold for ${nameOf(r.local_ip)}`);
+      thresholdInput.title = 'GiB in the rolling last 24 hours; leave empty to disable';
+      thresholdInput.addEventListener('click', ev => ev.stopPropagation());
+      thresholdInput.addEventListener('keydown', ev => ev.stopPropagation());
+      thresholdInput.addEventListener('change', () => {
+        const value = thresholdInput.value.trim();
+        if (!value) {
+          delete settings.volumeThresholds[r.local_ip];
+          delete settings.volumeAlerted[r.local_ip];
+        } else {
+          const thresholdGiB = Number(value);
+          if (!Number.isFinite(thresholdGiB) || thresholdGiB <= 0) {
+            thresholdInput.value = settings.volumeThresholds?.[r.local_ip] || '';
+            return;
+          }
+          settings.volumeThresholds[r.local_ip] = thresholdGiB;
+          delete settings.volumeAlerted[r.local_ip];
+        }
+        saveSettings();
+        loadStats();
+      });
+      threshold.append(thresholdInput);
       tr.append(nm, el('td', 'mono', r.local_ip + (r.external ? ' (external)' : '')), el('td', 'num', nf.format(+r.n || 0)), el('td', 'num', fmtBytes(r.b)),
-        el('td', 'num', nf.format(+r.rips || 0)), el('td', 'num', nf.format(+r.cc || 0)), el('td', 'mono', r.last ? fmtWhen(r.last) : '–'));
+        el('td', 'num', nf.format(+r.rips || 0)), el('td', 'num', nf.format(+r.cc || 0)),
+        el('td', 'mono', r.first ? fmtWhen(r.first) : '–'), el('td', 'mono', r.last ? fmtWhen(r.last) : '–'), threshold);
       return tr;
     }));
   }
@@ -1585,24 +1621,31 @@
   }
 
   // ---------- Erstkontakt: Land oder Firma zum ersten Mal seit 30 Tagen ----------
-  const known = { countries: new Set(), orgs: new Set(), ready: false };
+  const known = { countries: new Set(), orgs: new Set(), devices: new Set(), devicesReady: false, ready: false };
   async function loadKnown() {
     if (isDemo) return;
     try {
-      const [c, o, age] = await Promise.all([
+      const [c, o, d, age] = await Promise.all([
         vl('_time:30d (dir:out or dir:"in") r_country:* | stats by (r_country) count() as n'),
         vl('_time:30d (dir:out or dir:"in") r_org:* | stats by (r_org) count() as n'),
+        vl('_time:30d (dir:out or dir:"in") | stats by (local_ip) count() as n'),
         vl('_time:30d kind:flow | stats min(_time) as first')
       ]);
-      c.forEach(r => known.countries.add(r.r_country)); o.forEach(r => known.orgs.add(r.r_org));
+      c.forEach(r => known.countries.add(r.r_country)); o.forEach(r => known.orgs.add(r.r_org)); d.forEach(r => known.devices.add(r.local_ip));
+      known.devicesReady = true;
       // Erst melden, wenn es mindestens einen Tag Historie gibt – sonst wäre am Anfang alles „neu“
       const first = age[0] && Date.parse(age[0].first);
       known.ready = !!first && Date.now() - first > 86400000;
     } catch {}
   }
   function checkFirstContact(e) {
-    if (!known.ready || (e.dir !== 'out' && e.dir !== 'in')) return;
+    if (e.dir !== 'out' && e.dir !== 'in') return;
     const who = e.local_name || e.local_ip;
+    if (known.devicesReady && e.local_ip && !known.devices.has(e.local_ip)) {
+      known.devices.add(e.local_ip); e.isNew = true;
+      if (settings.alerts) toast(`Device not seen in 30 days: ${who} (${e.local_ip})`, () => openDossier('device', e.local_ip), 'new');
+    }
+    if (!known.ready) return;
     if (e.r_country && !known.countries.has(e.r_country)) {
       known.countries.add(e.r_country); e.isNew = true;
       if (settings.alerts) toast(`First contact with ${flag(e.r_country)} ${country(e.r_country)}: ${who} → ${e.r_org || e.remote_ip}`, () => openDossier('country', e.r_country), 'new');
@@ -1612,11 +1655,40 @@
     }
   }
 
+  function checkVolumeThresholds(rows) {
+    const totals = new Map(rows.map(r => [r.local_ip, +r.b || 0]));
+    let changed = false;
+    for (const [ip, raw] of Object.entries(settings.volumeThresholds || {})) {
+      const thresholdGiB = Number(raw);
+      if (!Number.isFinite(thresholdGiB) || thresholdGiB <= 0) continue;
+      const overLimit = (totals.get(ip) || 0) >= thresholdGiB * 1024 ** 3;
+      if (overLimit && Number(settings.volumeAlerted[ip]) !== thresholdGiB) {
+        settings.volumeAlerted[ip] = thresholdGiB;
+        changed = true;
+        if (settings.alerts) {
+          const total = totals.get(ip) || 0;
+          toast(`${nameOf(ip)} used ${fmtBytes(total)} in 24 h (limit ${fmtBytes(thresholdGiB * 1024 ** 3)})`,
+            () => openDossier('device', ip), 'limit');
+        }
+      } else if (!overLimit && ip in settings.volumeAlerted) {
+        delete settings.volumeAlerted[ip];
+        changed = true;
+      }
+    }
+    for (const ip of Object.keys(settings.volumeAlerted)) {
+      if (!(ip in (settings.volumeThresholds || {}))) {
+        delete settings.volumeAlerted[ip];
+        changed = true;
+      }
+    }
+    if (changed) saveSettings();
+  }
+
   // ---------- Meldungen ----------
   function toast(text, onClick, kind) {
     const box = $('toasts');
     const t = el('div', 'toast' + (kind ? ' ' + kind : ''));
-    t.append(el('span', 'kick', kind === 'new' ? 'NEW' : 'INFO'), el('span', null, text));
+    t.append(el('span', 'kick', kind === 'new' ? 'NEW' : kind === 'limit' ? 'LIMIT' : 'INFO'), el('span', null, text));
     if (onClick) { t.classList.add('click'); t.addEventListener('click', () => { onClick(); t.remove(); }); }
     box.prepend(t);
     while (box.children.length > 4) box.lastChild.remove();
@@ -1685,7 +1757,7 @@
     else if (world) { pauseRotation(); world.pointOfView(homeView(), 1200); }
   });
   $('resetSettings').addEventListener('click', () => {
-    Object.assign(settings, DEFAULT_SETTINGS);
+    Object.assign(settings, DEFAULT_SETTINGS, { volumeThresholds: {}, volumeAlerted: {} });
     if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
     applyUiSettings(); applyGlobeSettings(); renderSpark(); syncSettingsUi(); saveSettings();
   });

@@ -257,6 +257,7 @@ table.grid td.empty { color: var(--mute); }
 table.grid tbody tr { cursor: pointer; }
 table.grid tbody tr:hover { background: rgba(127,212,255,.06); }
 table.grid small { color: var(--mute); }
+.volume-threshold { width: 82px; padding: 3px 5px; background: var(--ink); border: 1px solid var(--line); border-radius: 3px; text-align: right; font: 12px var(--mono); }
 table.grid td[data-dir="out"] { color: var(--out); } table.grid td[data-dir="in"] { color: var(--in); } table.grid td[data-dir="internal"] { color: var(--internal); }
 .mini { display: block; height: 2px; background: var(--line); margin-top: 3px; } .mini i { display: block; height: 100%; background: var(--out); }
 .unnamed { color: var(--mute); font-style: italic; }
@@ -284,6 +285,8 @@ table.grid td[data-dir="out"] { color: var(--out); } table.grid td[data-dir="in"
 .toast { pointer-events: auto; display: flex; gap: 10px; align-items: baseline; background: color-mix(in srgb, var(--panel-solid) 95%, transparent); border: 1px solid #3a3220; border-left: 3px solid #f2c14e; border-radius: 4px; padding: 8px 12px; font-size: 14px; animation: tin .3s ease-out; transition: opacity .5s, transform .5s; }
 .toast.click { cursor: pointer; } .toast.click:hover { border-color: #f2c14e; }
 .toast .kick { font: 600 10.5px var(--mono); letter-spacing: .12em; color: #f2c14e; }
+.toast.limit { border-color: color-mix(in srgb, var(--blocked) 35%, var(--line)); border-left-color: var(--blocked); }
+.toast.limit .kick { color: var(--blocked); }
 .toast.out { opacity: 0; transform: translateY(-6px); }
 @keyframes tin { from { opacity: 0; transform: translateY(-8px); } }
 @media (max-width: 900px) { .drawer-head { flex-wrap: wrap; } .ds-head { width: 100%; } }
