@@ -315,6 +315,18 @@ func main() {
 	}
 	s := &store{path: env("HOSTS_FILE", "/config/hosts.csv")}
 	dashboard := newDashboardStore(env("DASHBOARD_FILE", "/config/dashboard.json"))
+	push, pushErr := newPushNotifier()
+	if pushErr != nil {
+		log.Printf("Push-Benachrichtigungen deaktiviert: %v", pushErr)
+	} else if push != nil {
+		dashboard.setPushEnabled(true)
+		log.Printf("Push-Benachrichtigungen aktiv (%s)", push.provider)
+		go runPushDelivery(context.Background(), dashboard, push)
+	}
+	unifi, unifiErr := newUniFiImporter()
+	if unifiErr != nil {
+		log.Printf("UniFi-Import deaktiviert: %v", unifiErr)
+	}
 	addr := env("LISTEN", "127.0.0.1:8092")
 	auth := newAuth(
 		os.Getenv("AUTH_PASSWORD_HASH"),
@@ -334,6 +346,7 @@ func main() {
 	mux := http.NewServeMux()
 	auth.routes(mux)
 	dashboard.routes(mux, auth)
+	unifi.routes(mux, auth, s)
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, 200, map[string]string{"status": "ok"})
 	})

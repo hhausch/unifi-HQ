@@ -65,8 +65,9 @@
       <label class="opt check"><input type="checkbox" id="optStars"> <span><b>Starry sky</b></span></label>
       <label class="opt check"><input type="checkbox" id="optAtmo"> <span><b>Atmosphere</b></span></label>
       <label class="opt check"><input type="checkbox" id="optBorders"> <span><b>Country borders</b></span></label>
-      <label class="opt check"><input type="checkbox" id="optChoro"> <span><b>Shade countries</b><br><small>The more connections in 24 h, the brighter the country.</small></span></label>
-      <label class="opt check"><input type="checkbox" id="optPoints"> <span><b>Hotspots</b><br><small>Dots for remote hosts from the last 15 minutes.</small></span></label>
+      <label class="opt check"><input type="checkbox" id="optChoro"> <span><b>Shade countries</b><br><small>Brighter for the selected metric in the last 24 h.</small></span></label>
+      <label class="opt row"><span><b>Hotspot metric</b></span><select id="optHotspotMetric"><option value="connections">Connections</option><option value="volume">Data volume</option></select></label>
+      <label class="opt check"><input type="checkbox" id="optPoints"> <span><b>Hotspots</b><br><small>Dots for remote hosts from the last 15 minutes; size reflects the selected metric.</small></span></label>
       <label class="opt check"><input type="checkbox" id="optHome"> <span><b>Label home</b></span></label>
       <label class="opt row"><span><b>Arcs</b></span>
         <select id="optStyle"><option value="strong">Bold, width by volume</option><option value="subtle">Subtle</option></select></label>
@@ -82,6 +83,27 @@
   </div>
   <div class="clock" id="clock">--:--:--</div>
 </header>
+
+<section class="map-tools" aria-label="Globe filters">
+  <select id="mapLocation" aria-label="Home location"><option value="">All locations</option></select>
+  <select id="mapDevice" aria-label="Filter by device"><option value="">All devices</option></select>
+  <input id="mapCountry" list="mapCountries" maxlength="2" placeholder="Country code" aria-label="Filter by country">
+  <datalist id="mapCountries"></datalist>
+  <input id="mapProvider" list="mapProviders" placeholder="Provider" aria-label="Filter by provider">
+  <datalist id="mapProviders"></datalist>
+  <select id="mapRule" aria-label="Filter by alert rule"><option value="">All rules</option></select>
+  <button type="button" class="tool" id="timeTravelOpen">Time travel</button>
+</section>
+<section class="timeline" id="timeTravel" hidden aria-label="Historical playback">
+  <div class="timeline-head"><strong>Historical playback</strong><button type="button" class="tool" id="timeTravelClose" aria-label="Close">✕</button></div>
+  <div class="timeline-controls">
+    <select id="timelineRange" aria-label="Playback time range"><option value="1h">Last hour</option><option value="24h" selected>Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option></select>
+    <button type="button" class="tool primary" id="timelineLoad">Load</button>
+    <button type="button" class="tool" id="timelinePlay" disabled>Play</button>
+  </div>
+  <input id="timelinePosition" type="range" min="0" max="0" value="0" step="1" aria-label="Playback position" disabled>
+  <div class="timeline-caption"><span id="timelineTime">Choose a period and load history</span><span id="timelineCount"></span></div>
+</section>
 
 <aside class="panel" id="left">
   <h2>Last 24 hours <span id="statsState"></span></h2>
@@ -229,6 +251,7 @@
         <option value="7d">7 days</option>
         <option value="30d">30 days</option>
       </select>
+      <button class="tool" id="unifiSync" hidden>Import UniFi</button>
       <button class="tool" id="devAdd">+ Name for IP</button>
       <button class="tool" id="devClose" aria-label="Close">✕</button>
     </div>
@@ -252,13 +275,41 @@
         <option value="device">Devices</option>
         <option value="first-contact">First contacts</option>
         <option value="volume">Volume limits</option>
+        <option value="rule">Custom rules</option>
       </select>
+      <button class="tool" id="manageRules">Rules</button>
       <button class="tool" id="alertsRead">Mark all read</button>
       <button class="tool" id="alertsClear">Clear archive</button>
       <button class="tool" id="alertsClose" aria-label="Close">✕</button>
     </div>
     <div class="result-info" id="alertInfo"></div>
     <ul class="alert-list" id="alertList"></ul>
+  </div>
+</div>
+
+<div class="drawer" id="rules" hidden role="dialog" aria-modal="true" aria-labelledby="ruleTitle">
+  <div class="drawer-box">
+    <div class="drawer-head">
+      <div class="ds-head"><div class="kicker">Detection</div><h2 id="ruleTitle">Custom alert rules</h2></div>
+      <button class="tool" id="rulesClose" aria-label="Close">✕</button>
+    </div>
+    <p class="result-info">First-contact rules compare a device's traffic against the preceding 30 days. Port rules alert on matching traffic and are deduplicated for 30 days.</p>
+    <form class="rule-form" id="ruleForm">
+      <input id="ruleName" required maxlength="64" placeholder="Rule name" aria-label="Rule name">
+      <select id="ruleType" aria-label="Rule type">
+        <option value="new-country">New country for device</option>
+        <option value="new-provider">New provider for device</option>
+        <option value="port">Connection to port</option>
+      </select>
+      <input id="ruleDevice" inputmode="numeric" placeholder="Device IP (optional)" aria-label="Device IP filter">
+      <label id="countryField" class="rule-field"><span>Country code, blank = any</span><input id="ruleCountry" maxlength="2" placeholder="DE"></label>
+      <label id="providerField" class="rule-field" hidden><span>Provider, blank = any</span><input id="ruleProvider" maxlength="100" placeholder="Example ISP"></label>
+      <label id="portField" class="rule-field" hidden><span>Destination port</span><input id="rulePort" type="number" min="1" max="65535" placeholder="443"></label>
+      <label id="protocolField" class="rule-field" hidden><span>Protocol</span><select id="ruleProtocol"><option value="">Any</option><option>TCP</option><option>UDP</option></select></label>
+      <button type="submit" class="tool primary">Add rule</button>
+      <span class="rule-error" id="ruleError" role="status"></span>
+    </form>
+    <ul class="rule-list" id="ruleList"></ul>
   </div>
 </div>
 

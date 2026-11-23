@@ -11,6 +11,7 @@
   // ---------- Einstellungen ----------
   const CONFIG = {
     home: { lat: 50.11, lng: 8.68, label: 'Home' },
+    locations: [],
     gateway: '',
     wsUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws',
     vlUrl: 'select/logsql/query',
@@ -74,7 +75,7 @@
     theme: 'navy', palette: 'default', uiScale: 1, panelAlpha: 0.76, showLeft: true, showRight: true,
     // Globus
     view: 'globe', autoRotate: !reduceMotion, rotateSpeed: 0.3, globeStyle: 'night', relief: true, stars: true, atmosphere: true,
-    borders: true, points: true, homeLabel: true, arcHeight: 0.38 };
+    borders: true, points: true, homeLabel: true, hotspotMetric: 'connections', arcHeight: 0.38 };
   const settings = Object.assign({}, DEFAULT_SETTINGS, store.get('settings', {}));
   if (lite) settings.arcRate = Math.min(settings.arcRate, 4);
 
@@ -119,7 +120,91 @@
   let world = null;
   const arcs = [], rings = [];
   const spots = new Map();
+  const unusualCountries = new Map();
+  let playbackActive = false;
+  let liveMapState = null;
+  let liveMapEvents = [];
+  let timelineEvents = [], timelineIndex = -1, timelineTimer = null, timelineLoadId = 0;
   let dirty = true;
+
+  function ipv4Number(ip) {
+    if (typeof ip !== 'string' || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return null;
+    const octets = ip.split('.').map(Number);
+    if (octets.some(x => x > 255)) return null;
+    return octets.reduce((n, octet) => ((n << 8) | octet) >>> 0, 0);
+  }
+  function homeFor(ip) {
+    const address = ipv4Number(ip);
+    let best = null, bestPrefix = -1;
+    if (address != null) for (const home of CONFIG.locations) for (const cidr of home.cidrs || []) {
+      const [networkText, prefixText] = String(cidr).split('/');
+      const network = ipv4Number(networkText), prefix = Number(prefixText);
+      if (network == null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) continue;
+      const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+      if ((address & mask) === (network & mask) && prefix > bestPrefix) { best = home; bestPrefix = prefix; }
+    }
+    return best || CONFIG.locations[0] || Object.assign({ id: 'default' }, CONFIG.home);
+  }
+  function mapVisible(e) {
+    if (!e || !filters[e.dir]) return false;
+    const locationId = $('mapLocation').value;
+    if (locationId && homeFor(e.local_ip).id !== locationId) return false;
+    if ($('mapDevice').value && e.local_ip !== $('mapDevice').value) return false;
+    const cc = $('mapCountry').value.trim().toUpperCase();
+    if (cc && String(e.r_country || '').toUpperCase() !== cc) return false;
+    const provider = $('mapProvider').value.trim().toLowerCase();
+    if (provider && !String(e.r_org || '').toLowerCase().includes(provider)) return false;
+    const rule = $('mapRule').value;
+    if (rule) {
+      const [type, value] = JSON.parse(rule);
+      if (type === 'country' && e.r_country !== value) return false;
+      if (type === 'org' && e.r_org !== value) return false;
+      if (type === 'device' && e.local_ip !== value) return false;
+    }
+    return true;
+  }
+  let mapOptionsTimer = null;
+  const alertTargets = new Set();
+  const hasAlertTarget = target => alertTargets.has(`org:${target.org}`) || alertTargets.has(`device:${target.local_ip}`) || alertTargets.has(`country:${target.cc}`);
+  function scheduleMapOptions() {
+    if (mapOptionsTimer) return;
+    mapOptionsTimer = setTimeout(() => { mapOptionsTimer = null; updateMapOptions(); }, 400);
+  }
+  function updateMapOptions() {
+    const replaceOptions = (select, first, entries) => {
+      const selected = select.value;
+      select.replaceChildren(new Option(first, ''), ...entries.map(([value, label]) => new Option(label, value)));
+      if ([...select.options].some(option => option.value === selected)) select.value = selected;
+    };
+    replaceOptions($('mapLocation'), 'All locations', CONFIG.locations.map(home => [home.id, home.label]));
+    const devices = new Map([...names].map(([ip, name]) => [ip, name || ip]));
+    spots.forEach(spot => { if (spot.local_ip && !devices.has(spot.local_ip)) devices.set(spot.local_ip, spot.local_ip); });
+    replaceOptions($('mapDevice'), 'All devices', [...devices].sort((a, b) => a[1].localeCompare(b[1])));
+    const countries = new Set([...countryStats.keys(), ...[...spots.values()].map(spot => spot.cc).filter(Boolean)]);
+    $('mapCountries').replaceChildren(...[...countries].sort().map(cc => new Option(country(cc, cc), cc)));
+    const providers = new Set([...spots.values()].map(spot => spot.org).filter(Boolean));
+    $('mapProviders').replaceChildren(...[...providers].sort().map(org => new Option(org, org)));
+    const rules = new Map(); alertTargets.clear();
+    for (const alert of alertRecords) if (alert.type === 'rule' && alert.targetType && alert.targetValue) {
+      const value = JSON.stringify([alert.targetType, alert.targetValue]);
+      rules.set(value, `${alert.title}: ${alert.targetValue}`);
+      alertTargets.add(`${alert.targetType}:${alert.targetValue}`);
+    }
+    replaceOptions($('mapRule'), 'All rule alerts', [...rules]);
+    refreshPolys(); refreshPoints();
+  }
+  function applyMapFilters() {
+    timelineLoadId++;
+    $('timelineLoad').disabled = false;
+    if (playbackActive) stopTimeline(true);
+    arcs.length = 0; rings.length = 0;
+    CONFIG.locations.forEach((home, index) => {
+      const ring = { lat: home.lat, lng: home.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 };
+      rings.push(ring);
+      if (index === 0) homeRing = ring;
+    });
+    dirty = true; flatDirty = true; refreshPoints();
+  }
 
   function initGlobe() {
     if (typeof Globe !== 'function') {
@@ -140,7 +225,7 @@
       .arcsTransitionDuration(0)
       .ringColor(d => t => rgba(d.color, Math.max(0, 1 - t)))
       .ringMaxRadius(d => d.max * globeNear.scale).ringPropagationSpeed(d => d.speed * globeNear.scale).ringRepeatPeriod(d => d.period)
-      .pointLat(d => d.lat).pointLng(d => d.lng).pointColor(d => rgba(COLORS[d.dir], 0.85))
+      .pointLat(d => d.lat).pointLng(d => d.lng).pointColor(d => d.isNew || hasAlertTarget(d) ? '#f2c14e' : rgba(COLORS[d.dir], 0.85))
       .pointAltitude(0.004).pointRadius(d => pointRadius(d) * globeNear.scale)
       .pointsTransitionDuration(0)
       .pointLabel(pointLabel)
@@ -153,7 +238,11 @@
       .tileAltitude(0.002).tileMaterial(globeTileMat).tilesTransitionDuration(0);
 
     try { world.renderer().setPixelRatio(lite ? 1 : Math.min(devicePixelRatio || 1, 2)); } catch {}
-    rings.push(homeRing = { lat: H.lat, lng: H.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 });
+    CONFIG.locations.forEach((home, index) => {
+      const ring = { lat: home.lat, lng: home.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 };
+      rings.push(ring);
+      if (index === 0) homeRing = ring;
+    });
 
     const controls = world.controls();
     controls.addEventListener('start', () => pauseRotation());
@@ -168,10 +257,11 @@
   }
   // versteckt (flache Karte) wäre die Größe 0 – dann beim Umschalten nachholen
   function resizeGlobe() { if (world && !globeEl.hidden) world.width(globeEl.clientWidth).height(globeEl.clientHeight); }
-  const pointRadius = d => 0.12 + Math.min(0.55, Math.log10(d.count + 1) * 0.22);   // in Grad
+  const pointValue = d => settings.hotspotMetric === 'volume' ? d.bytes : d.count;
+  const pointRadius = d => 0.12 + Math.min(0.55, Math.log10(pointValue(d) + 1) * 0.22);   // in Grad
   function pointLabel(d) {
     const box = el('div');
-    box.textContent = `${flag(d.cc)} ${d.place} · ${nf.format(d.count)}× ${VERB[d.dir]}` + (d.org ? ` · ${d.org}` : '');
+    box.textContent = `${flag(d.cc)} ${d.place} · ${settings.hotspotMetric === 'volume' ? fmtBytes(d.bytes) : nf.format(d.count) + ' connections'} · ${d.homeLabel || CONFIG.home.label}` + (d.org ? ` · ${d.org}` : '') + (d.isNew ? ' · NEW' : hasAlertTarget(d) ? ' · RULE ALERT' : '');
     return box.outerHTML;   // globe.gl erwartet HTML – Inhalt ist hier bereits escaped
   }
 
@@ -190,7 +280,8 @@
     put('arcAltitudeAutoScale', settings.arcHeight);
     put('backgroundImageUrl', !lite && settings.stars ? CONFIG.textures + 'night-sky.png' : null);
     put('bumpImageUrl', !lite && settings.relief ? CONFIG.textures + 'earth-topology.png' : null);
-    if (world.labelsData().length !== (settings.homeLabel ? 1 : 0)) world.labelsData(settings.homeLabel ? [CONFIG.home] : []);
+    const labels = settings.homeLabel ? CONFIG.locations.map(home => ({ lat: home.lat, lng: home.lng, label: home.label })) : [];
+    if (world.labelsData().length !== labels.length) world.labelsData(labels);
     // Textur selbst tauschen: globe.gl entfernt eine geladene Textur nicht, und nach einem
     // Neuladen bleibt der Globus schwarz. Die Textur wird daher einmal geladen und aufgehoben.
     const m = world.globeMaterial();
@@ -202,6 +293,7 @@
     } else {
       world.globeImageUrl(CONFIG.textures + 'black-marble.jpg');
     }
+    refreshPoints(); refreshPolys();
     const c = world.controls();
     c.autoRotateSpeed = settings.rotateSpeed;
     if (!settings.autoRotate) { clearTimeout(resumeTimer); resumeTimer = null; c.autoRotate = false; }
@@ -229,14 +321,16 @@
   setInterval(() => { tokens = Math.min(settings.arcRate, tokens + settings.arcRate / 10); }, 100);
   const recentArc = new Map();
 
-  function emitArc(e) {
-    if (!world || document.hidden || e.r_lat == null || e.r_lon == null || tokens < 1) return;
+  function emitArc(e, historical = false) {
+    if (!world || (!historical && (document.hidden || playbackActive)) || e.r_lat == null || e.r_lon == null || !mapVisible(e) || (!historical && tokens < 1)) return;
     const key = e.dir + '|' + e.remote_ip, now = Date.now();
-    if (now - (recentArc.get(key) || 0) < 3000) return;
-    recentArc.set(key, now);
-    if (recentArc.size > 2000) recentArc.clear();
-    tokens -= 1;
-    const H = CONFIG.home;
+    if (!historical) {
+      if (now - (recentArc.get(key) || 0) < 3000) return;
+      recentArc.set(key, now);
+      if (recentArc.size > 2000) recentArc.clear();
+      tokens -= 1;
+    }
+    const H = homeFor(e.local_ip);
     const towardHome = e.dir === 'in' || (e.dir === 'blocked' && e.bdir !== 'out');
     const remote = { lat: +e.r_lat, lng: +e.r_lon };
     const s = towardHome ? remote : H, t = towardHome ? H : remote;
@@ -250,7 +344,7 @@
       color: strong ? [rgba(color, 0.35), color] : [rgba(color, 0.05), color],
       dash: strong ? 0.6 : 0.4, gap: strong ? 1.4 : 2 };
     arcs.push(arc); dirty = true;
-    setTimeout(() => {
+    if (!historical) setTimeout(() => {
       const ring = { t0: Date.now(), lat: t.lat, lng: t.lng, color, max: (e.dir === 'blocked' ? 3.2 : 1.8) * (strong ? 1.4 + size : 1), speed: 2.4, period: 99999 };
       rings.push(ring); dirty = true;
       setTimeout(() => { const i = rings.indexOf(ring); if (i >= 0) rings.splice(i, 1); dirty = true; }, 1400);
@@ -259,22 +353,26 @@
   }
 
   function addSpot(e) {
-    if (e.r_lat == null || e.r_lon == null) return;
-    const key = `${(+e.r_lat).toFixed(1)},${(+e.r_lon).toFixed(1)}|${e.dir}`;
+    if (e.r_lat == null || e.r_lon == null || !mapVisible(e)) return;
+    const home = homeFor(e.local_ip);
+    const key = `${(+e.r_lat).toFixed(1)},${(+e.r_lon).toFixed(1)}|${e.dir}|${home.id}`;
     let s = spots.get(key);
     if (!s) {
-      s = { lat: +e.r_lat, lng: +e.r_lon, dir: e.dir, count: 0, cc: e.r_country, org: e.r_org,
+      s = { lat: +e.r_lat, lng: +e.r_lon, dir: e.dir, count: 0, bytes: 0, cc: e.r_country, org: e.r_org, local_ip: e.local_ip,
+            homeId: home.id, homeLabel: home.label,
             place: e.r_city || country(e.r_country, e.r_country_name) || '?' };
       spots.set(key, s);
     }
-    s.count++; s.last = Date.now();
+    s.count++; s.bytes += (+e.bytes || 0) + (+e.down || 0); s.isNew = s.isNew || !!e.isNew; s.last = e.ts || Date.now();
+    scheduleMapOptions();
   }
   let pointList = [];
   function refreshPoints() {
     if (!world && settings.view !== 'flat') return;
-    const cutoff = Date.now() - 15 * 60 * 1000;
+    const playTime = playbackActive && timelineEvents[timelineIndex] ? Date.parse(timelineEvents[timelineIndex]._time) : Date.now();
+    const cutoff = playTime - 15 * 60 * 1000;
     for (const [k, s] of spots) if (s.last < cutoff) spots.delete(k);
-    const list = [...spots.values()].filter(s => filters[s.dir]).sort((a, b) => b.count - a.count).slice(0, CONFIG.spotsMax);
+    const list = [...spots.values()].filter(s => mapVisible(s)).sort((a, b) => pointValue(b) - pointValue(a)).slice(0, CONFIG.spotsMax);
     pointList = settings.points ? list : [];
     if (world) world.pointsData(pointList);
   }
@@ -438,13 +536,16 @@
       r.count++; r.last = Date.now(); internalSeen.set(k, r);
       if (internalSeen.size > 500) { const oldest = [...internalSeen.entries()].sort((a, b) => a[1].last - b[1].last).slice(0, 250); oldest.forEach(([k2]) => internalSeen.delete(k2)); }
     } else {
-      addSpot(e);
+      checkFirstContact(e);
+      if (playbackActive) {
+        liveMapEvents.push(Object.assign({}, e));
+        if (liveMapEvents.length > CONFIG.historyLimit) liveMapEvents.shift();
+      } else addSpot(e);
     }
-    checkFirstContact(e);
     if (!visible(e)) return;
     stamps.push(Date.now());
     queue.push(e);
-    if (e.dir !== 'internal') emitArc(e);
+    if (e.dir !== 'internal' && !playbackActive) emitArc(e);
   }
   const handle = ingest;
 
@@ -555,7 +656,7 @@
       $('uniq').textContent = `${fmtNum(u.r)} destinations · ${fmtNum(u.o)} companies · ${fmtNum(u.c)} countries · ${fmtNum(u.l)} devices`;
       renderSpark();
 
-      countryStats.clear(); res.cAll.forEach(r => countryStats.set(r.r_country, { n: +r.n || 0, b: +r.b || 0 })); refreshPolys();
+      countryStats.clear(); res.cAll.forEach(r => countryStats.set(r.r_country, { n: +r.n || 0, b: +r.b || 0 })); updateMapOptions();
       renderBars($('topOrgs'), res.orgs, r => r.r_org, 'v', fmtBytes, null, undefined, r => ['org', r.r_org]);
       renderBars($('topCountriesOut'), res.cOut, r => `${flag(r.r_country)} ${country(r.r_country, r.r_country_name) || 'unknown'}`, 'v', null, null, undefined, r => ['country', r.r_country]);
       renderBars($('topDevices'), res.devices, r => nameOf(r.local_ip, r.local_name), 'v', fmtBytes, null, undefined, r => ['device', r.local_ip]);
@@ -902,7 +1003,7 @@
       delete settings.volumeAlerted;
       saveSettings();
     }
-    renderAlerts();
+    renderAlerts(); updateMapOptions();
     syncBrowserNotificationSetting();
   }
   async function saveDevicePref(ip, pref) {
@@ -1154,12 +1255,37 @@
 
   // ---------- Übersicht: Geräte (Namen vergeben) ----------
   const devBox = $('devices');
-  $('openDevices').addEventListener('click', () => { showOverlay(devBox); loadDevices(); });
+  $('openDevices').addEventListener('click', () => { showOverlay(devBox); loadDevices(); refreshUnifiStatus(); });
   $('devClose').addEventListener('click', () => hideOverlay(devBox));
   devBox.addEventListener('click', ev => { if (ev.target === devBox) hideOverlay(devBox); });
   $('devFilter').addEventListener('input', () => renderDevices());
   $('devRange').addEventListener('change', loadDevices);
   $('devAdd').addEventListener('click', () => { const ip = prompt('IP address (local or external):'); if (ip) editName(ip.trim()); });
+  async function refreshUnifiStatus() {
+    const button = $('unifiSync');
+    if (isDemo) { button.hidden = true; return; }
+    try {
+      const status = await dashboardApi('api/unifi/status');
+      button.hidden = !status.configured;
+    } catch (err) {
+      button.hidden = true;
+      console.warn('Could not load UniFi integration status:', err);
+      toast(`Could not load UniFi integration status: ${err.message || err}`, null, 'info');
+    }
+  }
+  $('unifiSync').addEventListener('click', async () => {
+    const button = $('unifiSync');
+    button.disabled = true;
+    try {
+      const result = await dashboardApi('api/unifi/sync', { method: 'POST' });
+      await loadDevices();
+      toast(`UniFi import complete: ${result.imported} imported, ${result.skipped} skipped`, null, 'new');
+    } catch (err) {
+      toast(`UniFi import failed: ${err.message || err}`, null, 'info');
+    } finally {
+      button.disabled = false;
+    }
+  });
   let devRows = [];
   async function loadDevices() {
     try { await Promise.all([loadNames(), loadDashboardData()]); }
@@ -1297,15 +1423,19 @@
   const sameCountry = (a, b) => !!a && !!b && (a === b || (!!a.properties.iso && a.properties.iso === b.properties.iso));
   function polyColor(d) {
     if (sameCountry(d, polySelected)) return 'rgba(242,193,78,0.35)';
+    const iso = d.properties.iso;
+    if (unusualCountries.has(iso) || alertTargets.has(`country:${iso}`)) return 'rgba(242,193,78,0.38)';
     const s = settings.choropleth ? countryStats.get(d.properties.iso) : null;
     const hover = sameCountry(d, polyHover) ? 0.12 : 0;
-    if (!s || !s.n) return rgba(COLORS.out, hover);
-    const max = Math.max(...[...countryStats.values()].map(x => x.n), 1);
-    const a = 0.08 + 0.42 * Math.log10(s.n + 1) / Math.log10(max + 1);
+    const value = s ? (settings.hotspotMetric === 'volume' ? s.b : s.n) : 0;
+    if (!value) return rgba(COLORS.out, hover);
+    const max = Math.max(...[...countryStats.values()].map(x => settings.hotspotMetric === 'volume' ? x.b : x.n), 1);
+    const a = 0.08 + 0.42 * Math.log10(value + 1) / Math.log10(max + 1);
     return rgba(COLORS.out, (a + hover).toFixed(3));
   }
   function polyStroke(d) {
     if (sameCountry(d, polySelected)) return 'rgba(242,193,78,0.9)';
+    if (unusualCountries.has(d.properties.iso) || alertTargets.has(`country:${d.properties.iso}`)) return 'rgba(242,193,78,0.9)';
     if (!settings.borders) return 'rgba(0,0,0,0)';
     return rgba(COLORS.out, settings.globeStyle === 'plain' ? 0.32 : 0.14);
   }
@@ -1465,7 +1595,7 @@
     }
   }
   // Hotspot-Größe in Pixeln: nach Anzahl, wächst beim Zoomen nur leicht mit
-  const flatPointR = p => (2 + Math.min(4.5, Math.log10(p.count + 1) * 2.2)) * flat.zoom ** 0.25;
+  const flatPointR = p => (2 + Math.min(4.5, Math.log10(pointValue(p) + 1) * 2.2)) * flat.zoom ** 0.25;
 
   // Quadratische Kurve, nach oben gewölbt; Höhe wie „Bogenhöhe“
   function arcGeom(a) {
@@ -1497,7 +1627,7 @@
     // Hotspots
     for (const p of pointList) {
       const r = flatPointR(p);
-      c.fillStyle = rgba(COLORS[p.dir], 0.85);
+      c.fillStyle = p.isNew || hasAlertTarget(p) ? '#f2c14e' : rgba(COLORS[p.dir], 0.85);
       c.beginPath(); c.arc(fx(p.lng, nearK(p.lng)), fy(p.lat), r, 0, 7); c.fill();
     }
     // Bögen: Leuchtstrich wandert in flightMs von Start zu Ziel
@@ -1522,8 +1652,8 @@
       c.strokeStyle = rgba(r.color, Math.max(0, 1 - deg / r.max));
       c.beginPath(); c.arc(fx(r.lng, nearK(r.lng)), fy(r.lat), 2 + deg * Math.min(sc, 10) * 1.5, 0, 7); c.stroke();
     }
-    if (settings.homeLabel) {
-      const H = CONFIG.home, x = fx(H.lng, nearK(H.lng)), y = fy(H.lat);
+    if (settings.homeLabel) for (const H of CONFIG.locations) {
+      const x = fx(H.lng, nearK(H.lng)), y = fy(H.lat);
       c.fillStyle = cssVar('--text') || '#dbe6f3';
       c.beginPath(); c.arc(x, y, 2.5, 0, 7); c.fill();
       c.font = '500 12px ' + (cssVar('--sans') || 'sans-serif'); c.textBaseline = 'middle';
@@ -1726,6 +1856,7 @@
     if (!known.ready) return;
     if (e.r_country && !known.countries.has(e.r_country)) {
       known.countries.add(e.r_country); e.isNew = true;
+      unusualCountries.set(e.r_country, Date.now()); refreshPolys();
     } else if (e.r_org && !known.orgs.has(e.r_org)) {
       known.orgs.add(e.r_org); e.isNew = true;
     }
@@ -1744,7 +1875,8 @@
   }
 
   const alertDrawer = $('alerts');
-  const alertTypeLabel = type => type === 'device' ? 'Device' : type === 'volume' ? 'Volume limit' : type === 'source' ? 'Data source' : 'First contact';
+  if (isDemo) $('manageRules').hidden = true;
+  const alertTypeLabel = type => type === 'device' ? 'Device' : type === 'volume' ? 'Volume limit' : type === 'source' ? 'Data source' : type === 'rule' ? 'Custom rule' : 'First contact';
   function updateAlertCount() {
     const unread = alertRecords.filter(a => !a.read).length;
     const badge = $('alertCount');
@@ -1785,7 +1917,7 @@
   async function refreshAlerts(notifyNew = false) {
     const previous = new Set(alertRecords.map(alert => alert.id));
     alertRecords = await dashboardApi('api/dashboard/alerts');
-    renderAlerts();
+    renderAlerts(); updateMapOptions();
     if (notifyNew) {
       for (const alert of alertRecords) if (!previous.has(alert.id)) showAlert(alert);
     }
@@ -1827,6 +1959,106 @@
   });
   $('alertsClose').addEventListener('click', () => hideOverlay(alertDrawer));
   alertDrawer.addEventListener('click', ev => { if (ev.target === alertDrawer) hideOverlay(alertDrawer); });
+  const ruleDrawer = $('rules');
+  let alertRules = [];
+  function renderAlertRules() {
+    const list = $('ruleList');
+    if (!alertRules.length) {
+      list.replaceChildren(el('li', 'empty', 'No custom rules yet.'));
+      return;
+    }
+    list.replaceChildren(...alertRules.map(rule => {
+      const item = el('li', rule.enabled ? '' : 'disabled');
+      const description = rule.type === 'new-country'
+        ? `New country${rule.country ? `: ${rule.country}` : ''}`
+        : rule.type === 'new-provider'
+          ? `New provider${rule.provider ? `: ${rule.provider}` : ''}`
+          : `Port ${rule.port}${rule.protocol ? `/${rule.protocol}` : ''}`;
+      const device = rule.deviceIp ? ` · ${rule.deviceIp}` : ' · any device';
+      const info = el('div', 'rule-description');
+      info.append(el('strong', null, rule.name), el('span', null, `${description}${device}`));
+      const actions = el('div', 'rule-actions');
+      const toggle = el('button', null, rule.enabled ? 'Disable' : 'Enable');
+      toggle.type = 'button';
+      toggle.addEventListener('click', async () => {
+        toggle.disabled = true;
+        try {
+          await dashboardApi(`api/dashboard/rules/${encodeURIComponent(rule.id)}`, {
+            method: 'PATCH', body: JSON.stringify({ enabled: !rule.enabled }),
+          });
+          await refreshAlertRules();
+        } catch (err) {
+          toast(`Could not update rule: ${err.message || err}`, null, 'info');
+          toggle.disabled = false;
+        }
+      });
+      const remove = el('button', null, 'Delete');
+      remove.type = 'button';
+      remove.addEventListener('click', async () => {
+        if (!confirm(`Delete alert rule "${rule.name}"?`)) return;
+        remove.disabled = true;
+        try {
+          await dashboardApi(`api/dashboard/rules/${encodeURIComponent(rule.id)}`, { method: 'DELETE' });
+          await refreshAlertRules();
+        } catch (err) {
+          toast(`Could not delete rule: ${err.message || err}`, null, 'info');
+          remove.disabled = false;
+        }
+      });
+      actions.append(toggle, remove);
+      item.append(info, actions);
+      return item;
+    }));
+  }
+  async function refreshAlertRules() {
+    alertRules = await dashboardApi('api/dashboard/rules');
+    renderAlertRules();
+  }
+  function updateRuleFields() {
+    const type = $('ruleType').value;
+    $('countryField').hidden = type !== 'new-country';
+    $('providerField').hidden = type !== 'new-provider';
+    $('portField').hidden = type !== 'port';
+    $('protocolField').hidden = type !== 'port';
+    $('rulePort').required = type === 'port';
+  }
+  $('ruleType').addEventListener('change', updateRuleFields);
+  $('manageRules').addEventListener('click', async () => {
+    showOverlay(ruleDrawer);
+    $('ruleError').textContent = '';
+    try { await refreshAlertRules(); }
+    catch (err) { $('ruleList').replaceChildren(el('li', 'empty', `Could not load rules: ${err.message || err}`)); }
+  });
+  $('rulesClose').addEventListener('click', () => hideOverlay(ruleDrawer));
+  ruleDrawer.addEventListener('click', ev => { if (ev.target === ruleDrawer) hideOverlay(ruleDrawer); });
+  $('ruleForm').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const type = $('ruleType').value;
+    const rule = {
+      name: $('ruleName').value.trim(), type,
+      deviceIp: $('ruleDevice').value.trim(), enabled: true,
+    };
+    if (type === 'new-country') rule.country = $('ruleCountry').value.trim().toUpperCase();
+    if (type === 'new-provider') rule.provider = $('ruleProvider').value.trim();
+    if (type === 'port') {
+      rule.port = Number($('rulePort').value);
+      rule.protocol = $('ruleProtocol').value;
+    }
+    $('ruleError').textContent = '';
+    const submit = $('ruleForm').querySelector('[type="submit"]');
+    submit.disabled = true;
+    try {
+      await dashboardApi('api/dashboard/rules', { method: 'POST', body: JSON.stringify(rule) });
+      $('ruleForm').reset();
+      updateRuleFields();
+      await refreshAlertRules();
+    } catch (err) {
+      $('ruleError').textContent = err.message || String(err);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  updateRuleFields();
   $('alertFilter').addEventListener('change', renderAlerts);
   $('alertsRead').addEventListener('click', () => markAlertsRead([], true));
   $('alertsClear').addEventListener('click', async () => {
@@ -1899,6 +2131,7 @@
     { id: 'optChoro', key: 'choropleth', type: 'check', globe: true, liteOff: true },
     { id: 'optPoints', key: 'points', type: 'check', globe: true },
     { id: 'optHome', key: 'homeLabel', type: 'check', globe: true },
+    { id: 'optHotspotMetric', key: 'hotspotMetric', type: 'select', globe: true },
     { id: 'optStyle', key: 'arcStyle', type: 'select' },
     { id: 'optRate', key: 'arcRate', type: 'range', scale: 1, label: 'optRateVal', fmt: v => String(v) },
     { id: 'optArcH', key: 'arcHeight', type: 'range', scale: 100, globe: true, label: 'optArcHVal', fmt: v => fmtDec(v, 2) }
@@ -1944,6 +2177,132 @@
   });
   $('sparkTitle').addEventListener('click', () => { sparkMode = sparkMode === 'bytes' ? 'hits' : 'bytes'; store.set('sparkMode', sparkMode); renderSpark(); });
 
+  for (const id of ['mapLocation', 'mapDevice', 'mapCountry', 'mapProvider', 'mapRule']) {
+    $(id).addEventListener('change', () => {
+      applyMapFilters();
+      if (id === 'mapLocation' && $('mapLocation').value) {
+        const home = CONFIG.locations.find(item => item.id === $('mapLocation').value);
+        if (home) focusOn(home.lat, home.lng);
+      }
+    });
+  }
+
+  $('timeTravelOpen').addEventListener('click', () => { $('timeTravel').hidden = !$('timeTravel').hidden; });
+  $('timeTravelClose').addEventListener('click', () => { timelineLoadId++; $('timelineLoad').disabled = false; stopTimeline(true); $('timeTravel').hidden = true; });
+  $('timelineLoad').addEventListener('click', loadTimeline);
+  $('timelinePlay').addEventListener('click', toggleTimeline);
+  $('timelinePosition').addEventListener('input', () => {
+    pauseTimeline();
+    const index = +$('timelinePosition').value;
+    $('timelineTime').textContent = timelineEvents[index] ? new Date(timelineEvents[index].ts).toLocaleString(LOCALE) : 'No events';
+  });
+  $('timelinePosition').addEventListener('change', () => {
+    if (!timelineEvents.length) return;
+    pauseTimeline();
+    startTimeline(); renderTimelineAt(+$('timelinePosition').value);
+  });
+
+  const timelineDurations = { '1h': 3600000, '24h': 86400000, '7d': 604800000, '30d': 2592000000 };
+  async function loadTimeline() {
+    const requestId = ++timelineLoadId;
+    pauseTimeline();
+    $('timelineLoad').disabled = true;
+    $('timelineTime').textContent = 'Loading history …';
+    try {
+      const range = $('timelineRange').value;
+      const rows = isDemo
+        ? (demo.log || []).filter(row => Date.now() - Date.parse(row._time || row.timestamp) <= timelineDurations[range] && (!row.leg || row.leg === 'req'))
+        : await vl(`_time:${range} kind:flow leg:req | sort by (_time desc) | limit 2000`, 2000);
+      if (requestId !== timelineLoadId) return;
+      timelineEvents = rows.map(row => Object.assign({}, row, { timestamp: row.timestamp || row._time }))
+        .filter(event => COLORS[event.dir] && isFinite(Date.parse(event.timestamp)))
+        .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+        .map(event => Object.assign(event, { _time: event.timestamp, ts: Date.parse(event.timestamp), bytes: +event.bytes || 0 }));
+      if (!timelineEvents.length) {
+        stopTimeline(true); $('timelineCount').textContent = '0 events'; $('timelineTime').textContent = 'No flow history in this period';
+        $('timelinePosition').disabled = true; $('timelinePlay').disabled = true; return;
+      }
+      $('timelinePosition').max = String(timelineEvents.length - 1);
+      $('timelinePosition').value = '0'; $('timelinePosition').disabled = false; $('timelinePlay').disabled = false;
+      $('timelinePlay').textContent = 'Play';
+      $('timelineCount').textContent = `${nf.format(timelineEvents.length)} events (max 2,000)`;
+      startTimeline(); renderTimelineAt(0);
+    } catch (err) {
+      if (requestId !== timelineLoadId) return;
+      stopTimeline(true);
+      $('timelineTime').textContent = 'Could not load history';
+      toast(`Historical playback failed: ${err.message || err}`, null, 'info');
+    } finally { if (requestId === timelineLoadId) $('timelineLoad').disabled = false; }
+  }
+  function startTimeline() {
+    if (playbackActive) return;
+    if (!liveMapState) liveMapState = { arcs: arcs.slice(), rings: rings.slice(), spots: new Map([...spots].map(([key, spot]) => [key, Object.assign({}, spot)])) };
+    playbackActive = true;
+    liveMapEvents = [];
+    arcs.length = 0; rings.length = 0; spots.clear();
+    CONFIG.locations.forEach((home, index) => {
+      const ring = { lat: home.lat, lng: home.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 };
+      rings.push(ring); if (index === 0) homeRing = ring;
+    });
+    timelineIndex = -1; refreshPoints(); dirty = true; flatDirty = true;
+  }
+  function renderTimelineAt(index) {
+    timelineIndex = Math.max(0, Math.min(index, timelineEvents.length - 1));
+    arcs.length = 0; rings.length = 0; spots.clear();
+    const selected = timelineEvents[timelineIndex], start = selected.ts - 15 * 60 * 1000;
+    CONFIG.locations.forEach((home, i) => {
+      const ring = { lat: home.lat, lng: home.lng, color: COLORS.out, max: 2.5, speed: 1, period: 2600 };
+      rings.push(ring); if (i === 0) homeRing = ring;
+    });
+    for (let i = 0; i <= timelineIndex; i++) {
+      const event = timelineEvents[i];
+      if (event.ts >= start) addSpot(event);
+      if (event.ts >= selected.ts - 10000) emitArc(event, true);
+    }
+    $('timelinePosition').value = String(timelineIndex);
+    $('timelineTime').textContent = new Date(selected.ts).toLocaleString(LOCALE);
+    refreshPoints(); dirty = true; flatDirty = true;
+  }
+  function advanceTimeline() {
+    if (timelineIndex + 1 >= timelineEvents.length) { pauseTimeline(); $('timelinePlay').textContent = 'Replay'; return; }
+    timelineIndex++;
+    const event = timelineEvents[timelineIndex];
+    addSpot(event); emitArc(event, true);
+    $('timelinePosition').value = String(timelineIndex);
+    $('timelineTime').textContent = new Date(event.ts).toLocaleString(LOCALE);
+    $('timelinePlay').textContent = 'Pause';
+    refreshPoints();
+  }
+  function pauseTimeline() {
+    clearInterval(timelineTimer); timelineTimer = null;
+    if (timelineEvents.length) $('timelinePlay').textContent = timelineIndex >= timelineEvents.length - 1 ? 'Replay' : 'Play';
+  }
+  function toggleTimeline() {
+    if (timelineTimer) { pauseTimeline(); return; }
+    if (!timelineEvents.length) return;
+    startTimeline();
+    if (timelineIndex >= timelineEvents.length - 1) renderTimelineAt(0);
+    advanceTimeline();
+    timelineTimer = setInterval(advanceTimeline, 300);
+  }
+  function stopTimeline(restore) {
+    pauseTimeline();
+    if (!playbackActive) return;
+    const queuedLiveEvents = liveMapEvents;
+    playbackActive = false;
+    arcs.length = 0; rings.length = 0; spots.clear();
+    if (restore && liveMapState) {
+      const now = Date.now();
+      arcs.push(...liveMapState.arcs.filter(arc => now - arc.t0 < CONFIG.flightMs * 2));
+      rings.push(...liveMapState.rings.filter(ring => !ring.t0 || now - ring.t0 < 1400));
+      liveMapState.spots.forEach((spot, key) => spots.set(key, spot));
+    }
+    liveMapState = null; timelineIndex = -1;
+    liveMapEvents = [];
+    if (restore) for (const event of queuedLiveEvents) { addSpot(event); emitArc(event); }
+    refreshPoints(); dirty = true; flatDirty = true;
+  }
+
   // ---------- Login ----------
   // Fragt die Sitzung ab und verlängert dabei das Cookie (gleitend, 400 Tage).
   // Ein Kiosk, der nie neu lädt, bleibt so dauerhaft angemeldet.
@@ -1967,16 +2326,26 @@
     if (isDemo) return;
     try {
       const r = await fetch('config.json', { cache: 'no-store' });
-      if (r.status === 401) return toLogin();
-      if (!r.ok) return;
-      const c = await r.json();
-      if (c.home && isFinite(+c.home.lat) && isFinite(+c.home.lng)) CONFIG.home = { lat: +c.home.lat, lng: +c.home.lng, label: String(c.home.label || 'Home') };
-      if (c.gateway) CONFIG.gateway = String(c.gateway);
-    } catch {}
+      if (r.status === 401) toLogin();
+      else if (!r.ok) console.warn(`Dashboard configuration unavailable: HTTP ${r.status}`);
+      else {
+        const c = await r.json();
+        if (c.home && isFinite(+c.home.lat) && isFinite(+c.home.lng)) CONFIG.home = { lat: +c.home.lat, lng: +c.home.lng, label: String(c.home.label || 'Home') };
+        if (c.gateway) CONFIG.gateway = String(c.gateway);
+        if (Array.isArray(c.locations)) {
+          CONFIG.locations = c.locations.filter(home => home && isFinite(+home.lat) && isFinite(+home.lng) && Math.abs(+home.lat) <= 90 && Math.abs(+home.lng) <= 180)
+            .map((home, index) => ({ id: String(home.id || `home-${index + 1}`), lat: +home.lat, lng: +home.lng,
+              label: String(home.label || `Home ${index + 1}`), cidrs: Array.isArray(home.cidrs) ? home.cidrs.filter(cidr => typeof cidr === 'string') : [] }));
+        }
+      }
+    } catch (err) { console.warn('Dashboard configuration unavailable:', err); }
+    if (!CONFIG.locations.length) CONFIG.locations = [Object.assign({ id: 'default', cidrs: [] }, CONFIG.home)];
+    CONFIG.home = CONFIG.locations[0];
   }
 
   loadConfig().then(() => {
-    if (isDemo) { CONFIG.home = { lat: 50.11, lng: 8.68, label: 'Frankfurt' }; CONFIG.gateway = 'QuantumGateway'; }
+    if (isDemo) { CONFIG.home = { id: 'default', lat: 50.11, lng: 8.68, label: 'Frankfurt', cidrs: [] }; CONFIG.locations = [CONFIG.home]; CONFIG.gateway = 'QuantumGateway'; }
+    updateMapOptions();
     $('gwName').textContent = CONFIG.gateway;
     document.title = 'Lagezentrum' + (CONFIG.gateway ? ' · ' + CONFIG.gateway : '');
     flat.lng = CONFIG.home.lng;

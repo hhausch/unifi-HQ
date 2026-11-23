@@ -91,6 +91,14 @@ services:
       DASHBOARD_FILE: /config/dashboard.json
       ALERT_INTERVAL: ${ALERT_INTERVAL:-1m}
       ALERT_SOURCE_STALE_AFTER: ${ALERT_SOURCE_STALE_AFTER:-15m}
+      ALERT_PUSH_PROVIDER: ${ALERT_PUSH_PROVIDER:-off}
+      ALERT_PUSH_URL: ${ALERT_PUSH_URL:-}
+      ALERT_PUSH_TOKEN: ${ALERT_PUSH_TOKEN:-}
+      ALERT_PUSH_TOPIC: ${ALERT_PUSH_TOPIC:-}
+      UNIFI_URL: ${UNIFI_URL:-}
+      UNIFI_API_KEY: ${UNIFI_API_KEY:-}
+      UNIFI_SITE_ID: ${UNIFI_SITE_ID:-}
+      UNIFI_CA_FILE: ${UNIFI_CA_FILE:-}
       LISTEN: 127.0.0.1:8092
       AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:-}   # ./lagezentrum.sh password
       AUTH_SECRET: ${AUTH_SECRET:-}
@@ -116,6 +124,7 @@ services:
       HOME_LON: ${HOME_LON:-8.68}
       HOME_LABEL: ${HOME_LABEL:-Home}
       GATEWAY_NAME: ${GATEWAY_NAME:-Gateway}
+      GLOBE_LOCATIONS_JSON: ${GLOBE_LOCATIONS_JSON:-[]}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./caddy/auth:/etc/caddy/auth:ro

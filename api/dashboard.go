@@ -24,6 +24,7 @@ const (
 	maxDashboardBody = 256 << 10
 	maxDashboardIPs  = 2000
 	maxAlerts        = 1000
+	maxAlertRules    = 50
 	alertRetention   = 90 * 24 * time.Hour
 	alertDedupWindow = 30 * 24 * time.Hour
 )
@@ -48,11 +49,25 @@ type dashboardAlert struct {
 	TargetValue string    `json:"targetValue,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	Read        bool      `json:"read"`
+	PushPending bool      `json:"pushPending,omitempty"`
+}
+
+type alertRule struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	DeviceIP   string `json:"deviceIp,omitempty"`
+	Country    string `json:"country,omitempty"`
+	Provider   string `json:"provider,omitempty"`
+	Port       int    `json:"port,omitempty"`
+	Protocol   string `json:"protocol,omitempty"`
+	Enabled    bool   `json:"enabled"`
 }
 
 type dashboardData struct {
 	Devices     map[string]devicePreferences `json:"devices"`
 	Alerts      []dashboardAlert             `json:"alerts"`
+	AlertRules  []alertRule                  `json:"alertRules"`
 	SourceStale map[string]bool              `json:"sourceStale,omitempty"`
 }
 
@@ -60,6 +75,7 @@ type dashboardStore struct {
 	mu   sync.Mutex
 	path string
 	now  func() time.Time
+	pushEnabled bool
 }
 
 func newDashboardStore(path string) *dashboardStore {
@@ -69,6 +85,7 @@ func newDashboardStore(path string) *dashboardStore {
 func (s *dashboardStore) loadLocked() (dashboardData, error) {
 	data := dashboardData{
 		Devices: map[string]devicePreferences{}, Alerts: []dashboardAlert{},
+		AlertRules: []alertRule{},
 		SourceStale: map[string]bool{},
 	}
 	f, err := os.Open(s.path)
@@ -100,11 +117,17 @@ func (s *dashboardStore) loadLocked() (dashboardData, error) {
 	if data.Alerts == nil {
 		data.Alerts = []dashboardAlert{}
 	}
+	if data.AlertRules == nil {
+		data.AlertRules = []alertRule{}
+	}
 	if data.SourceStale == nil {
 		data.SourceStale = map[string]bool{}
 	}
 	if len(data.Devices) > maxDashboardIPs {
 		return dashboardData{}, errors.New("too many device preferences")
+	}
+	if len(data.AlertRules) > maxAlertRules {
+		return dashboardData{}, errors.New("too many alert rules")
 	}
 	if len(data.Alerts) > maxAlerts {
 		data.Alerts = data.Alerts[:maxAlerts]
@@ -225,6 +248,113 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 		}
 		jsonOut(w, http.StatusOK, data.Alerts)
 	}))
+	mux.HandleFunc("GET /api/dashboard/rules", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		data, err := s.loadLocked()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "cannot read dashboard settings")
+			return
+		}
+		jsonOut(w, http.StatusOK, data.AlertRules)
+	}))
+
+	mux.HandleFunc("POST /api/dashboard/rules", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			fail(w, http.StatusForbidden, "cross-origin request rejected")
+			return
+		}
+		var rule alertRule
+		if !decodeDashboardJSON(w, r, &rule) {
+			return
+		}
+		if err := validateAlertRule(&rule); err != nil {
+			fail(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		id, err := randomID()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "cannot create alert rule")
+			return
+		}
+		rule.ID = id
+		rule.Enabled = true
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		data, err := s.loadLocked()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "cannot read dashboard settings")
+			return
+		}
+		if len(data.AlertRules) >= maxAlertRules {
+			fail(w, http.StatusBadRequest, "too many alert rules")
+			return
+		}
+		data.AlertRules = append(data.AlertRules, rule)
+		if err := s.saveLocked(data); err != nil {
+			fail(w, http.StatusInternalServerError, "saving alert rule failed")
+			return
+		}
+		jsonOut(w, http.StatusCreated, rule)
+	}))
+
+	mux.HandleFunc("PATCH /api/dashboard/rules/{id}", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			fail(w, http.StatusForbidden, "cross-origin request rejected")
+			return
+		}
+		var input struct {
+			Enabled bool `json:"enabled"`
+		}
+		if !decodeDashboardJSON(w, r, &input) {
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		data, err := s.loadLocked()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "cannot read dashboard settings")
+			return
+		}
+		for i := range data.AlertRules {
+			if data.AlertRules[i].ID == r.PathValue("id") {
+				data.AlertRules[i].Enabled = input.Enabled
+				if err := s.saveLocked(data); err != nil {
+					fail(w, http.StatusInternalServerError, "saving alert rule failed")
+					return
+				}
+				jsonOut(w, http.StatusOK, data.AlertRules[i])
+				return
+			}
+		}
+		fail(w, http.StatusNotFound, "alert rule not found")
+	}))
+
+	mux.HandleFunc("DELETE /api/dashboard/rules/{id}", auth.require(func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			fail(w, http.StatusForbidden, "cross-origin request rejected")
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		data, err := s.loadLocked()
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "cannot read dashboard settings")
+			return
+		}
+		for i := range data.AlertRules {
+			if data.AlertRules[i].ID == r.PathValue("id") {
+				data.AlertRules = append(data.AlertRules[:i], data.AlertRules[i+1:]...)
+				if err := s.saveLocked(data); err != nil {
+					fail(w, http.StatusInternalServerError, "deleting alert rule failed")
+					return
+				}
+				jsonOut(w, http.StatusOK, data.AlertRules)
+				return
+			}
+		}
+		fail(w, http.StatusNotFound, "alert rule not found")
+	}))
 
 	mux.HandleFunc("PUT /api/dashboard/device", auth.require(func(w http.ResponseWriter, r *http.Request) {
 		if !sameOrigin(r) {
@@ -319,7 +449,7 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 			fail(w, http.StatusBadRequest, "invalid alert key")
 			return
 		}
-		if input.Type != "device" && input.Type != "first-contact" && input.Type != "volume" && input.Type != "source" {
+		if input.Type != "device" && input.Type != "first-contact" && input.Type != "volume" && input.Type != "source" && input.Type != "rule" {
 			fail(w, http.StatusBadRequest, "invalid alert type")
 			return
 		}
@@ -371,6 +501,7 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 			fail(w, http.StatusInternalServerError, "cannot create alert")
 			return
 		}
+		s.queuePush(&alert)
 		data.Alerts = prependAlert(data.Alerts, alert)
 		if err := s.saveLocked(data); err != nil {
 			fail(w, http.StatusInternalServerError, "saving alert failed")
@@ -476,15 +607,82 @@ func (s *dashboardStore) routes(mux *http.ServeMux, auth *authCfg) {
 	}))
 }
 
+func validateAlertRule(rule *alertRule) error {
+	name, err := cleanDashboardText(rule.Name, 64)
+	if err != nil || name == "" {
+		return errors.New("rule name is required and must be at most 64 characters")
+	}
+	rule.Name = name
+	switch rule.Type {
+	case "new-country":
+		if rule.Country != "" && (len(rule.Country) != 2 || !isASCIIAlpha(rule.Country)) {
+			return errors.New("country must be a two-letter ISO code")
+		}
+		rule.Country = strings.ToUpper(rule.Country)
+	case "new-provider":
+		provider, err := cleanDashboardText(rule.Provider, 100)
+		if err != nil {
+			return errors.New("invalid provider filter")
+		}
+		rule.Provider = provider
+	case "port":
+		if rule.Port < 1 || rule.Port > 65535 {
+			return errors.New("port must be between 1 and 65535")
+		}
+		protocol := strings.ToUpper(rule.Protocol)
+		if protocol != "" && protocol != "TCP" && protocol != "UDP" {
+			return errors.New("protocol must be TCP or UDP")
+		}
+		rule.Protocol = protocol
+	default:
+		return errors.New("rule type must be new-country, new-provider or port")
+	}
+	if rule.DeviceIP != "" {
+		ip, err := netip.ParseAddr(strings.TrimSpace(rule.DeviceIP))
+		if err != nil {
+			return errors.New("device must be a valid IP address")
+		}
+		rule.DeviceIP = ip.String()
+	}
+	return nil
+}
+
+func isASCIIAlpha(value string) bool {
+	for _, r := range value {
+		if !((r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *dashboardStore) queuePush(alert *dashboardAlert) {
+	alert.PushPending = s.pushEnabled
+}
+
+func (s *dashboardStore) setPushEnabled(enabled bool) {
+	s.mu.Lock()
+	s.pushEnabled = enabled
+	s.mu.Unlock()
+}
+
 func makeDashboardAlert(key, kind, title, detail, ip, targetType, targetValue string, now time.Time) (dashboardAlert, error) {
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
+	id, err := randomID()
+	if err != nil {
 		return dashboardAlert{}, err
 	}
 	return dashboardAlert{
-		ID: hex.EncodeToString(id[:]), Key: key, Type: kind, Title: title, Detail: detail,
+		ID: id, Key: key, Type: kind, Title: title, Detail: detail,
 		IP: ip, TargetType: targetType, TargetValue: targetValue, CreatedAt: now,
 	}, nil
+}
+
+func randomID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(id[:]), nil
 }
 
 func prependAlert(alerts []dashboardAlert, alert dashboardAlert) []dashboardAlert {

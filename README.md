@@ -123,10 +123,15 @@ certificate name. Without cloning:
 | `AUTH_COOKIE_SECURE` | set to `true` when a reverse proxy terminates TLS before forwarding HTTP to the dashboard |
 | `ALLOWED_SENDERS` | IP of the gateway sending NetFlow/syslog (default: the LXC's default gateway) |
 | `GATEWAY_NAME`, `HOME_LABEL`, `HOME_LAT`, `HOME_LON` | name and location on the globe |
+| `GLOBE_LOCATIONS_JSON` | optional JSON array for multiple home sites; each site has `id`, `label`, `lat`, `lng`, and IPv4 `cidrs` |
 | `LOCAL_EXTRA_NETS` | your IPv6 prefix, e.g. `2003:ab:cd00::/56`, otherwise your own IPv6 devices show up as foreign |
 | `LOCAL_SERVER_PORTS` | ports reachable from outside (port forwards, VPN server), default `51820` |
 | `ALERT_INTERVAL` | server-side alert check interval, default `1m` (allowed: `10s`–`15m`) |
 | `ALERT_SOURCE_STALE_AFTER` | no-event time before NetFlow/IPFIX or firewall alerts, default `15m` (allowed: `1m`–`7d`) |
+| `ALERT_PUSH_PROVIDER`, `ALERT_PUSH_URL` | optional push delivery via `ntfy` or `gotify`; default `off` |
+| `ALERT_PUSH_TOKEN`, `ALERT_PUSH_TOPIC` | optional ntfy access token/topic, or required Gotify token; keep credentials in `.env` |
+| `UNIFI_URL`, `UNIFI_API_KEY` | optional UniFi OS integration API on UCG/UDM; use HTTPS and a local read-only API key |
+| `UNIFI_SITE_ID`, `UNIFI_CA_FILE` | site ID (required only when the controller has multiple sites) and optional CA certificate path inside the API container |
 | Login password | asked at the end of `setup` (min. 10 characters), stored only as a hash in `.env`; without one the dashboard stays locked |
 
 Everything lives in `.env` and can be changed there (then `docker compose up -d`). Direct HTTPS is at
@@ -262,11 +267,20 @@ history (incl. GeoIP). Then:
 | **Ticker** | Upload ↑, download ↓ and duration per connection. On hover: ✎ rename, dossier for device, country, company or IP. Click zooms to the location, double-click opens the history for that IP. Header shows connections and volume per minute. |
 | **Left panel** | 24 h counters with volume, number of destinations/companies/countries/devices, hourly chart (click the title to switch between connections and volume), top destinations, countries, services, largest and longest connections, devices. Countries, companies and devices open their dossier, the rest opens the history. |
 | **Globe / map** | Countries are shaded by traffic in the last 24 h. Click a country or hotspot to open its dossier. The flat map (⚙ → Map → View) pans by dragging and zooms with the wheel. Both load finer borders (1:50m) and sharper texture tiles when zoomed in, only for the visible area. |
+| **Globe tools** | Filter map arcs and hotspots by home site, device, country, provider or a matching custom-rule alert. These filters do not change statistics or the ticker. Select connection count or data volume for hotspot size and country shading. First contacts in the known-destination window and custom-rule targets are highlighted in gold. *Time travel* loads up to 2,000 request events from history for scrubbing and playback; live ticker and statistics continue, and closing playback restores the live map. |
 | **Dossier** | For a country, device, company or IP: key numbers (connections, volume, IPs, devices, first/last seen, blocked), timeline, top lists and all **source → destination** pairs with service, count and volume. Range 1 h to 30 days. Click a pair for the individual connections. |
 | **Countries** | All countries as a sortable table. Click opens the dossier. |
-| **Devices** | All addresses with traffic in the selected range, including first/last seen, connections, volume, remote hosts and countries. Add or remove names (✎), also for external IPs (*+ Name for IP*, e.g. your VPS). Add a group and note, then filter by name, IP, group or note. Set an optional per-device volume threshold in GiB with a rolling period of 1 h, 24 h or 7 days and direction of upload, download or both. These settings are shared by all dashboard browsers. |
-| **Discovery, volume and source alerts** | The API monitors configured per-device thresholds (1 h, 24 h or 7 days; upload/download/both), devices and first contacts, plus stale NetFlow/IPFIX and firewall/Syslog data sources. Discovery baselines exclude existing 30-day traffic; country/company alerts wait until there is at least one day of history. Source alerts default to 15 minutes without events; tune `ALERT_SOURCE_STALE_AFTER`. Checks run on the server even when every browser is closed. Alerts are archived for up to 90 days (maximum 1,000), shared by all browsers, and can be filtered, marked read or cleared. Popups and optional browser notifications are delivered only while a dashboard is open; closed browsers receive alerts in the archive when next opened. |
+| **Devices** | All addresses with traffic in the selected range, including first/last seen, connections, volume, remote hosts and countries. Add or remove names (✎), also for external IPs (*+ Name for IP*, e.g. your VPS). Add a group and note, then filter by name, IP, group or note. Set an optional per-device volume threshold in GiB with a rolling period of 1 h, 24 h or 7 days and direction of upload, download or both. These settings are shared by all dashboard browsers. When UniFi OS import is configured, *Import UniFi* adds names for clients with an IP and hostname/name; existing names are never overwritten. Configure `UNIFI_URL` and `UNIFI_API_KEY` with a local read-only API key; set `UNIFI_SITE_ID` when the controller has multiple sites. For a private controller CA, mount its certificate under `./config` and set `UNIFI_CA_FILE=/config/<certificate>.pem`. |
+| **Discovery, volume and source alerts** | The API monitors configured per-device thresholds (1 h, 24 h or 7 days; upload/download/both), devices and first contacts, plus stale NetFlow/IPFIX and firewall/Syslog data sources. Discovery baselines exclude existing 30-day traffic; country/company alerts wait until there is at least one day of history. In the alert archive, *Rules* adds enabled rules for a device's new country/provider or matching destination port. Country/provider rules compare against the device's previous 30-day traffic; rule alerts are shared and deduplicated for 30 days. Source alerts default to 15 minutes without events; tune `ALERT_SOURCE_STALE_AFTER`. Checks run on the server even when every browser is closed. Alerts are archived for up to 90 days (maximum 1,000), shared by all browsers, and can be filtered, marked read or cleared. Optional ntfy/Gotify push is configured with `ALERT_PUSH_PROVIDER`, `ALERT_PUSH_URL` and credentials in `.env`; delivery retries while pending. Popups and optional browser notifications are delivered only while a dashboard is open; closed browsers receive alerts in the archive when next opened. |
 | **History** (key `/`) | Full-text search over IP, device, country, city, provider, or plain LogsQL. |
+
+Multiple home sites can be configured through `GLOBE_LOCATIONS_JSON`. Use a valid JSON array and list each site's private IPv4 CIDRs so local device IPs map to the correct globe origin. Longest matching prefix wins; flows without a matching CIDR use the first configured site. For example:
+
+```dotenv
+GLOBE_LOCATIONS_JSON=[{"id":"frankfurt","label":"Frankfurt","lat":50.11,"lng":8.68,"cidrs":["10.37.10.0/24"]},{"id":"berlin","label":"Berlin","lat":52.52,"lng":13.405,"cidrs":["10.37.20.0/24"]}]
+```
+
+Restart the dashboard after changing this value. CIDRs currently support IPv4; locations without a CIDR remain selectable but are not automatically assigned to devices.
 
 ![History](docs/history.png)
 

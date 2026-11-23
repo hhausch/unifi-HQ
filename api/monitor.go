@@ -40,12 +40,17 @@ type discoveryEvent struct {
 	Country        string `json:"r_country"`
 	CountryName    string `json:"r_country_name"`
 	Organization   string `json:"r_org"`
+	Port           int    `json:"dport"`
+	Protocol       string `json:"proto"`
 }
 
 type discoveryState struct {
 	devices   map[string]bool
 	countries map[string]bool
 	orgs      map[string]bool
+	deviceCountries map[string]bool
+	deviceOrgs      map[string]bool
+	devicePorts     map[string]bool
 	ready     bool
 }
 
@@ -177,6 +182,7 @@ func (s *dashboardStore) checkVolumeSamples(samples []volumeSample) ([]dashboard
 			if alertErr != nil {
 				return nil, alertErr
 			}
+			s.queuePush(&alert)
 			prefs.VolumeAbove[stateKey] = true
 			data.Alerts = prependAlert(data.Alerts, alert)
 			created = append(created, alert)
@@ -217,6 +223,7 @@ func (s *dashboardStore) appendAlerts(alerts []dashboardAlert) error {
 			}
 		}
 		if !duplicate {
+			s.queuePush(&alert)
 			data.Alerts = prependAlert(data.Alerts, alert)
 			changed = true
 		}
@@ -257,6 +264,7 @@ func (s *dashboardStore) updateSourceStates(observations map[string]sourceObserv
 		if alertErr != nil {
 			return alertErr
 		}
+		m.store.queuePush(&alert)
 		data.Alerts = prependAlert(data.Alerts, alert)
 		data.SourceStale[name] = stale
 		changed = true
@@ -390,7 +398,7 @@ func (m *dashboardMonitor) checkDiscoveries(ctx context.Context) {
 		lookback = 2 * time.Minute
 	}
 	lookbackMinutes := int(math.Ceil(lookback.Minutes()))
-	query := fmt.Sprintf(`_time:%dm (dir:out or dir:"in") | stats by (local_ip, local_name, remote_ip, r_country, r_country_name, r_org) count() as n`, lookbackMinutes)
+	query := fmt.Sprintf(`_time:%dm (dir:out or dir:"in") | stats by (local_ip, local_name, remote_ip, r_country, r_country_name, r_org, dport, proto) count() as n`, lookbackMinutes)
 	rows, err := m.query(ctx, query, monitorQueryLimit)
 	if err != nil {
 		log.Printf("Alarmüberwachung: neue Kontakte konnten nicht abgefragt werden: %v", err)
@@ -404,10 +412,16 @@ func (m *dashboardMonitor) checkDiscoveries(ctx context.Context) {
 			LocalIP: rowString(row, "local_ip"), LocalName: rowString(row, "local_name"),
 			RemoteIP: rowString(row, "remote_ip"), Country: rowString(row, "r_country"),
 			CountryName: rowString(row, "r_country_name"), Organization: rowString(row, "r_org"),
+			Port: int(rowFloat(row, "dport")), Protocol: strings.ToUpper(rowString(row, "proto")),
 		}
 		who := event.LocalName
 		if who == "" {
 			who = event.LocalIP
+		}
+		if !m.discovery.ready {
+			alerts = append(alerts, m.matchAlertRules(event, now, window)...)
+			m.addSeenValues(event)
+			continue
 		}
 		if event.LocalIP != "" && !m.discovery.devices[event.LocalIP] {
 			m.discovery.devices[event.LocalIP] = true
@@ -416,9 +430,6 @@ func (m *dashboardMonitor) checkDiscoveries(ctx context.Context) {
 			} else {
 				log.Printf("Alarmüberwachung: Gerätealarm konnte nicht erstellt werden: %v", alertErr)
 			}
-		}
-		if !m.discovery.ready {
-			continue
 		}
 		if event.Country != "" && !m.discovery.countries[event.Country] {
 			m.discovery.countries[event.Country] = true
@@ -439,6 +450,8 @@ func (m *dashboardMonitor) checkDiscoveries(ctx context.Context) {
 				log.Printf("Alarmüberwachung: Organisationsalarm konnte nicht erstellt werden: %v", alertErr)
 			}
 		}
+		alerts = append(alerts, m.matchAlertRules(event, now, window)...)
+		m.addSeenValues(event)
 	}
 	if err := m.store.appendAlerts(alerts); err != nil {
 		log.Printf("Alarmüberwachung: Entdeckungsalarme konnten nicht gespeichert werden: %v", err)
@@ -451,6 +464,9 @@ func (m *dashboardMonitor) loadDiscoveryBaseline(ctx context.Context) (*discover
 		`_time:30d (dir:out or dir:"in") r_country:* | stats by (r_country) count() as n`,
 		`_time:30d (dir:out or dir:"in") r_org:* | stats by (r_org) count() as n`,
 		`_time:30d kind:flow | stats min(_time) as first`,
+		`_time:30d (dir:out or dir:"in") r_country:* | stats by (local_ip, r_country) count() as n`,
+		`_time:30d (dir:out or dir:"in") r_org:* | stats by (local_ip, r_org) count() as n`,
+		`_time:30d (dir:out or dir:"in") | stats by (local_ip, dport, proto) count() as n`,
 	}
 	results := make([][]map[string]json.RawMessage, len(queries))
 	errs := make([]error, len(queries))
@@ -470,7 +486,8 @@ func (m *dashboardMonitor) loadDiscoveryBaseline(ctx context.Context) (*discover
 	}
 	state := &discoveryState{
 		devices: make(map[string]bool, len(results[0])), countries: make(map[string]bool, len(results[1])),
-		orgs: make(map[string]bool, len(results[2])),
+		orgs: make(map[string]bool, len(results[2])), deviceCountries: map[string]bool{},
+		deviceOrgs: map[string]bool{}, devicePorts: map[string]bool{},
 	}
 	for _, row := range results[0] {
 		if ip := rowString(row, "local_ip"); ip != "" {
@@ -486,6 +503,15 @@ func (m *dashboardMonitor) loadDiscoveryBaseline(ctx context.Context) (*discover
 		if org := rowString(row, "r_org"); org != "" {
 			state.orgs[org] = true
 		}
+	}
+	for _, row := range results[4] {
+		state.deviceCountries[seenKey(rowString(row, "local_ip"), rowString(row, "r_country"))] = true
+	}
+	for _, row := range results[5] {
+		state.deviceOrgs[seenKey(rowString(row, "local_ip"), rowString(row, "r_org"))] = true
+	}
+	for _, row := range results[6] {
+		state.devicePorts[seenKey(rowString(row, "local_ip"), strconv.Itoa(int(rowFloat(row, "dport"))), strings.ToUpper(rowString(row, "proto")))] = true
 	}
 	if len(results[3]) > 0 {
 		first := rowString(results[3][0], "first")
@@ -510,4 +536,79 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return "unknown"
+}
+
+func seenKey(parts ...string) string {
+	return strings.Join(parts, "\x00")
+}
+
+func (m *dashboardMonitor) addSeenValues(event discoveryEvent) {
+	if event.LocalIP == "" {
+		return
+	}
+	if event.Country != "" {
+		m.discovery.deviceCountries[seenKey(event.LocalIP, event.Country)] = true
+	}
+	if event.Organization != "" {
+		m.discovery.deviceOrgs[seenKey(event.LocalIP, event.Organization)] = true
+	}
+	if event.Port > 0 {
+		m.discovery.devicePorts[seenKey(event.LocalIP, strconv.Itoa(event.Port), event.Protocol)] = true
+	}
+}
+
+func (m *dashboardMonitor) matchAlertRules(event discoveryEvent, now time.Time, window int64) []dashboardAlert {
+	if event.LocalIP == "" {
+		return nil
+	}
+	m.store.mu.Lock()
+	data, err := m.store.loadLocked()
+	m.store.mu.Unlock()
+	if err != nil {
+		log.Printf("Alarmüberwachung: Regeln konnten nicht geladen werden: %v", err)
+		return nil
+	}
+	alerts := make([]dashboardAlert, 0)
+	for _, rule := range data.AlertRules {
+		if !rule.Enabled || (rule.DeviceIP != "" && rule.DeviceIP != event.LocalIP) {
+			continue
+		}
+		keyParts := []string{rule.ID, event.LocalIP}
+		title, detail, targetType, targetValue := "", "", "device", event.LocalIP
+		switch rule.Type {
+		case "new-country":
+			if event.Country == "" || (rule.Country != "" && !strings.EqualFold(rule.Country, event.Country)) || m.discovery.deviceCountries[seenKey(event.LocalIP, event.Country)] {
+				continue
+			}
+			keyParts = append(keyParts, "country", event.Country)
+			title = "Rule: new country for " + firstNonEmpty(event.LocalName, event.LocalIP)
+			detail = fmt.Sprintf("%s connected to %s (%s)", firstNonEmpty(event.LocalName, event.LocalIP), firstNonEmpty(event.CountryName, event.Country), firstNonEmpty(event.Organization, event.RemoteIP))
+			targetType, targetValue = "country", event.Country
+		case "new-provider":
+			if event.Organization == "" || (rule.Provider != "" && !strings.EqualFold(rule.Provider, event.Organization)) || m.discovery.deviceOrgs[seenKey(event.LocalIP, event.Organization)] {
+				continue
+			}
+			keyParts = append(keyParts, "provider", event.Organization)
+			title = "Rule: new provider for " + firstNonEmpty(event.LocalName, event.LocalIP)
+			detail = fmt.Sprintf("%s connected to %s (%s)", firstNonEmpty(event.LocalName, event.LocalIP), event.Organization, firstNonEmpty(event.CountryName, event.Country))
+			targetType, targetValue = "org", event.Organization
+		case "port":
+			if event.Port != rule.Port || (rule.Protocol != "" && !strings.EqualFold(rule.Protocol, event.Protocol)) {
+				continue
+			}
+			if rule.Country != "" && !strings.EqualFold(rule.Country, event.Country) {
+				continue
+			}
+			keyParts = append(keyParts, "port", strconv.Itoa(event.Port), event.Protocol)
+			title = "Rule: port " + strconv.Itoa(event.Port) + " used"
+			detail = fmt.Sprintf("%s connected to %s:%d/%s", firstNonEmpty(event.LocalName, event.LocalIP), event.RemoteIP, event.Port, firstNonEmpty(event.Protocol, "IP"))
+		}
+		alert, err := makeDashboardAlert(discoveryAlertKey("rule", window, keyParts...), "rule", title, detail, event.LocalIP, targetType, targetValue, now)
+		if err != nil {
+			log.Printf("Alarmüberwachung: Regelalarm konnte nicht erstellt werden: %v", err)
+			continue
+		}
+		alerts = append(alerts, alert)
+	}
+	return alerts
 }

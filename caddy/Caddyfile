@@ -74,7 +74,7 @@
 		handle /config.json {
 			header Content-Type application/json
 			header Cache-Control no-store
-			respond `{"home":{"lat":{$HOME_LAT:50.11},"lng":{$HOME_LON:8.68},"label":"{$HOME_LABEL:Home}"},"gateway":"{$GATEWAY_NAME:Gateway}"}` 200
+			respond `{"home":{"lat":{$HOME_LAT:50.11},"lng":{$HOME_LON:8.68},"label":"{$HOME_LABEL:Home}"},"gateway":"{$GATEWAY_NAME:Gateway}","locations":{$GLOBE_LOCATIONS_JSON:[]}}` 200
 		}
 
 		handle /select/* {
